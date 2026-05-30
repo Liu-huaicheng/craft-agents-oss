@@ -494,8 +494,6 @@ export class ClaudeAgent extends BaseAgent {
   private preferencesDriftNotified: boolean = false;
   // Captured stderr from SDK subprocess (for error diagnostics when process exits with code 1)
   private lastStderrOutput: string[] = [];
-  /** Pending steer message — injected via additionalContext on next PreToolUse */
-  private pendingSteerMessage: string | null = null;
 
   /**
    * Get the session ID for mode operations.
@@ -801,9 +799,6 @@ export class ClaudeAgent extends BaseAgent {
   ): AsyncGenerator<AgentEvent> {
     // Extract options (ChatOptions interface from AgentBackend)
     const _isRetry = options?.isRetry ?? false;
-
-    // Clear any leftover steer from a previous turn (safety net — should already be null)
-    this.pendingSteerMessage = null;
 
     try {
       const sessionId = this.config.session?.id || `temp-${Date.now()}`;
@@ -1135,25 +1130,9 @@ export class ClaudeAgent extends BaseAgent {
                 onDebug: (msg) => this.onDebug?.(msg),
               });
 
-              // Consume pending steer message (if any) — will be injected via additionalContext
-              const steerMsg = this.pendingSteerMessage;
-              if (steerMsg) {
-                this.pendingSteerMessage = null;
-                this.debug(`Injecting steer via additionalContext on ${input.tool_name}`);
-              }
-
               // Translate result to SDK format
               switch (checkResult.type) {
                 case 'allow':
-                  if (steerMsg) {
-                    return {
-                      continue: true,
-                      hookSpecificOutput: {
-                        hookEventName: 'PreToolUse' as const,
-                        additionalContext: `The user just sent a new message while you were working. Stop what you are currently doing and address their message instead:\n\n${steerMsg}`,
-                      },
-                    };
-                  }
                   return { continue: true };
 
                 case 'modify':
@@ -1162,7 +1141,6 @@ export class ClaudeAgent extends BaseAgent {
                     hookSpecificOutput: {
                       hookEventName: 'PreToolUse' as const,
                       updatedInput: checkResult.input,
-                      ...(steerMsg ? { additionalContext: `The user just sent a new message while you were working. Stop what you are currently doing and address their message instead:\n\n${steerMsg}` } : {}),
                     },
                   };
 
@@ -2136,15 +2114,6 @@ This is a branched conversation. All prior messages in this conversation are par
       yield { type: 'complete' };
     } finally {
       this.currentQuery = null;
-
-      // If a steer message was never delivered (no PreToolUse fired), notify the session
-      // layer so it can re-queue the message for the next turn.
-      const undeliveredSteer = this.pendingSteerMessage;
-      if (undeliveredSteer) {
-        this.pendingSteerMessage = null;
-        this.debug(`Steer message was not delivered (no tool call fired) — emitting steer_undelivered`);
-        yield { type: 'steer_undelivered' as const, message: undeliveredSteer };
-      }
     }
   }
 
@@ -2484,20 +2453,25 @@ This is a branched conversation. All prior messages in this conversation are par
   }
 
   /**
-   * Redirect mid-stream via additionalContext injection.
-   * Stores the message; the next PreToolUse hook injects it into the conversation.
-   * If no tool call fires before the turn ends, yields steer_undelivered so the
-   * session layer can re-queue the message.
+   * Redirect mid-stream. Claude cannot reliably steer an in-flight turn: the
+   * SDK exposes no mid-stream input channel, and the previous best-effort
+   * approach — stash the message, inject it via the next PreToolUse hook's
+   * `additionalContext` — had two production failure modes:
+   *   1. It corrupted the SDK resume state, so subsequent turns completed with
+   *      no assistant response (empty turns).
+   *   2. When no tool call fired before the turn ended it became
+   *      `steer_undelivered` and was re-queued without the original message id,
+   *      duplicating the user message on replay.
+   *
+   * So "Steer immediately" for Claude means: abort the current turn now and let
+   * the session layer replay the queued message (full shape, id preserved) as a
+   * clean fresh turn — the same proven path as UserStop and source-activated
+   * auto-retry. Returning false tells the session layer to queue + replay.
    */
   override redirect(message: string): boolean {
-    if (!this.currentQuery || !this.currentQueryAbortController) {
-      // Not actively streaming — fall back to abort + queue
-      this.forceAbort(AbortReason.Redirect);
-      return false;
-    }
-    this.debug(`Steering mid-stream: "${message.slice(0, 100)}"`);
-    this.pendingSteerMessage = message;
-    return true;
+    this.debug(`Redirect (abort + replay): "${message.slice(0, 100)}"`);
+    this.forceAbort(AbortReason.Redirect);
+    return false;
   }
 
   /**
@@ -2509,7 +2483,6 @@ This is a branched conversation. All prior messages in this conversation are par
    */
   override interruptForHandoff(reason: AbortReason): void {
     this.lastAbortReason = reason;
-    this.pendingSteerMessage = null; // Clear any undelivered steer
 
     if (!this.currentQuery) {
       return;
@@ -2529,7 +2502,6 @@ This is a branched conversation. All prior messages in this conversation are par
    */
   forceAbort(reason: AbortReason = AbortReason.UserStop): void {
     this.lastAbortReason = reason;
-    this.pendingSteerMessage = null; // Clear any undelivered steer
     if (this.currentQueryAbortController) {
       this.currentQueryAbortController.abort(reason);
       this.currentQueryAbortController = null;

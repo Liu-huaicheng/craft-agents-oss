@@ -7458,14 +7458,6 @@ export class SessionManager implements ISessionManager {
         }
         break
 
-      case 'steer_undelivered':
-        // Steer message was not delivered (no PreToolUse fired before turn ended).
-        // Re-queue it so it's sent as a normal message on the next turn.
-        sessionLog.info(`Steer message undelivered, re-queuing for session ${sessionId}`)
-        managed.messageQueue.push({ message: event.message })
-        managed.wasInterrupted = true
-        break
-
       // Note: working_directory_changed is user-initiated only (via updateWorkingDirectory),
       // the agent no longer has a change_working_directory tool
     }

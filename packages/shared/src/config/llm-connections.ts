@@ -453,10 +453,11 @@ export function isPiProvider(providerType: LlmProviderType): boolean {
 /**
  * Default mid-stream send behavior for a given provider type.
  *
- * - 'anthropic' → 'queue': Claude's emulated steer (PreToolUse hook injection)
- *   has a real failure mode — if no tool fires before the turn ends, the steer
- *   becomes `steer_undelivered` and gets re-queued anyway, paying for the
- *   original turn's tokens for nothing. Default to queue for predictability.
+ * - 'anthropic' → 'queue': Claude cannot steer an in-flight turn (the SDK has
+ *   no mid-stream input channel). Its 'steer' is implemented as abort + replay
+ *   (ClaudeAgent.redirect), which is destructive — it throws away the current
+ *   turn's work. Default to queue so the in-flight turn finishes first; users
+ *   who want immediate handling can opt into 'steer'.
  * - 'pi' / 'pi_compat' → 'steer': Pi's native `.steer()` is non-destructive
  *   (delivers after the current tool finishes, keeps full context). No
  *   downside to defaulting to immediate steering.
