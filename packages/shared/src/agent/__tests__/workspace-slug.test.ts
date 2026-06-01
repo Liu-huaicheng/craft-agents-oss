@@ -279,3 +279,109 @@ describe('qualifySkillName with filesystem resolution', () => {
     expect(result.input).toEqual({ skill: 'my-workspace:ws-only' })
   })
 })
+
+// ============================================================================
+// qualifySkillName with marketplace plugin resolution (resolveMarketplacePluginSkill)
+//
+// Marketplace plugins are Claude Code CLI-installed plugins enabled in
+// ~/.claude/settings.json. They are namespaced by the plugin manifest `name`
+// (e.g. `jira:jira`), not the workspace slug. Uses a unique CLAUDE_CONFIG_DIR
+// and unique slugs so the real ~/.claude and ~/.agents tiers never interfere.
+// ============================================================================
+
+describe('qualifySkillName with marketplace plugin resolution', () => {
+  const testDir = join(tmpdir(), `skill-marketplace-test-${Date.now()}`)
+  const claudeHome = join(testDir, '.claude')
+  const workspaceRoot = join(testDir, 'my-workspace')
+  const workspaceSlug = 'my-workspace'
+  const prevConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const prevDisable = process.env.CRAFT_DISABLE_CLAUDE_PLUGINS
+
+  beforeAll(() => {
+    // Workspace skill whose slug also exists in a marketplace plugin (priority test)
+    mkdirSync(join(workspaceRoot, 'skills', 'mkt-overlap'), { recursive: true })
+    writeFileSync(join(workspaceRoot, 'skills', 'mkt-overlap', 'SKILL.md'), '---\nname: WS Overlap\ndescription: test\n---\n')
+
+    // Enabled marketplace plugin: install key "mkt-plugin@market", manifest name "mkt-plugin"
+    const enabledInstall = join(claudeHome, 'plugins', 'cache', 'market', 'mkt-plugin', '1.0.0')
+    mkdirSync(join(enabledInstall, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(enabledInstall, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'mkt-plugin', version: '1.0.0', skills: ['./skills/'] }))
+    mkdirSync(join(enabledInstall, 'skills', 'mkt-skill'), { recursive: true })
+    writeFileSync(join(enabledInstall, 'skills', 'mkt-skill', 'SKILL.md'), '---\nname: Mkt Skill\ndescription: test\n---\n')
+    // Same plugin also ships "mkt-overlap" to verify workspace tier wins
+    mkdirSync(join(enabledInstall, 'skills', 'mkt-overlap'), { recursive: true })
+    writeFileSync(join(enabledInstall, 'skills', 'mkt-overlap', 'SKILL.md'), '---\nname: Plugin Overlap\ndescription: test\n---\n')
+
+    // Disabled marketplace plugin with skill "mkt-hidden"
+    const disabledInstall = join(claudeHome, 'plugins', 'cache', 'market', 'mkt-secret', '1.0.0')
+    mkdirSync(join(disabledInstall, '.claude-plugin'), { recursive: true })
+    writeFileSync(join(disabledInstall, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'mkt-secret', version: '1.0.0', skills: ['./skills/'] }))
+    mkdirSync(join(disabledInstall, 'skills', 'mkt-hidden'), { recursive: true })
+    writeFileSync(join(disabledInstall, 'skills', 'mkt-hidden', 'SKILL.md'), '---\nname: Hidden\ndescription: test\n---\n')
+
+    writeFileSync(join(claudeHome, 'plugins', 'installed_plugins.json'), JSON.stringify({
+      version: 2,
+      plugins: {
+        'mkt-plugin@market': [{ scope: 'user', installPath: enabledInstall, version: '1.0.0' }],
+        'mkt-secret@market': [{ scope: 'user', installPath: disabledInstall, version: '1.0.0' }],
+      },
+    }))
+    writeFileSync(join(claudeHome, 'settings.json'), JSON.stringify({
+      enabledPlugins: { 'mkt-plugin@market': true, 'mkt-secret@market': false },
+    }))
+
+    process.env.CLAUDE_CONFIG_DIR = claudeHome
+    delete process.env.CRAFT_DISABLE_CLAUDE_PLUGINS
+  })
+
+  afterAll(() => {
+    rmSync(testDir, { recursive: true, force: true })
+    if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = prevConfigDir
+    if (prevDisable === undefined) delete process.env.CRAFT_DISABLE_CLAUDE_PLUGINS
+    else process.env.CRAFT_DISABLE_CLAUDE_PLUGINS = prevDisable
+  })
+
+  it('resolves an enabled marketplace plugin skill to pluginName:slug', () => {
+    const result = qualifySkillName({ skill: 'mkt-skill' }, workspaceSlug, workspaceRoot)
+    expect(result.modified).toBe(true)
+    expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
+  })
+
+  it('does not modify a correctly qualified marketplace skill', () => {
+    const result = qualifySkillName({ skill: 'mkt-plugin:mkt-skill' }, workspaceSlug, workspaceRoot)
+    expect(result.modified).toBe(false)
+    expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
+  })
+
+  it('re-qualifies a workspace-prefixed marketplace skill to the plugin namespace', () => {
+    // Reproduces the reported bug: a marketplace skill emitted as
+    // "{workspaceSlug}:mkt-skill" must be rewritten to "mkt-plugin:mkt-skill",
+    // not left as an unknown workspace-namespaced command.
+    const result = qualifySkillName({ skill: 'my-workspace:mkt-skill' }, workspaceSlug, workspaceRoot)
+    expect(result.modified).toBe(true)
+    expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
+  })
+
+  it('prefers a workspace skill over a same-named marketplace skill', () => {
+    const result = qualifySkillName({ skill: 'mkt-overlap' }, workspaceSlug, workspaceRoot)
+    expect(result.modified).toBe(true)
+    expect(result.input).toEqual({ skill: 'my-workspace:mkt-overlap' })
+  })
+
+  it('ignores a disabled marketplace plugin skill (falls back to workspace)', () => {
+    const result = qualifySkillName({ skill: 'mkt-hidden' }, workspaceSlug, workspaceRoot)
+    expect(result.modified).toBe(true)
+    expect(result.input).toEqual({ skill: 'my-workspace:mkt-hidden' })
+  })
+
+  it('respects CRAFT_DISABLE_CLAUDE_PLUGINS=1 (skips marketplace tier)', () => {
+    process.env.CRAFT_DISABLE_CLAUDE_PLUGINS = '1'
+    try {
+      const result = qualifySkillName({ skill: 'mkt-skill' }, workspaceSlug, workspaceRoot)
+      expect(result.input).toEqual({ skill: 'my-workspace:mkt-skill' })
+    } finally {
+      delete process.env.CRAFT_DISABLE_CLAUDE_PLUGINS
+    }
+  })
+})
