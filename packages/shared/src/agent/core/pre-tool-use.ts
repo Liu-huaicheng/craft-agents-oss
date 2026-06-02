@@ -48,6 +48,7 @@ import {
 import { permissionsConfigCache, type PermissionsContext } from '../permissions-config.ts';
 import type { PrerequisiteCheckResult } from './prerequisite-manager.ts';
 import { rewriteBashWithRtk } from './rtk-rewrite.ts';
+import { resolveMarketplacePluginSkill } from '../claude-plugins.ts';
 
 // ============================================================
 // TYPES
@@ -276,6 +277,16 @@ function resolveSkillPlugin(
   // 3. Global: ~/.agents/skills/{slug}/SKILL.md
   if (existsSync(join(GLOBAL_AGENT_SKILLS_DIR, bareSlug, 'SKILL.md'))) {
     return `${AGENTS_PLUGIN_NAME}:${bareSlug}`;
+  }
+
+  // 4. Marketplace plugin: Claude Code CLI-installed plugins enabled in
+  //    ~/.claude/settings.json. These are namespaced by the plugin manifest's
+  //    `name` (e.g. `jira:jira`), not the workspace slug. Without this, an
+  //    enabled plugin skill falls through to the workspace fallback below and
+  //    the SDK rejects it as `Unknown command: {workspaceSlug}:{slug}`.
+  const marketplaceSkill = resolveMarketplacePluginSkill(bareSlug);
+  if (marketplaceSkill) {
+    return marketplaceSkill;
   }
 
   // Fallback: assume workspace plugin (original behavior)
