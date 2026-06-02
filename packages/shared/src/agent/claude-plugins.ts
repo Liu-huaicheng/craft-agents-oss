@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { join, isAbsolute, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { debug } from '../utils/debug.ts';
 
@@ -89,37 +89,109 @@ export function discoverEnabledClaudePlugins(): SdkPluginConfig[] {
   return result;
 }
 
+interface EnabledPluginManifest {
+  installPath: string;
+  name: string;
+  skillDirs: string[];
+}
+
+interface PluginManifestCacheEntry {
+  configDir: string;
+  installedMtimeMs: number;
+  settingsMtimeMs: number;
+  plugins: EnabledPluginManifest[];
+}
+
+// Memoized parse of enabled-plugin manifests. Invalidated when either Claude
+// config file changes (by mtime) or CLAUDE_CONFIG_DIR is repointed, so the
+// PreToolUse Skill hot path doesn't re-read/parse N files on every invocation.
+let manifestCache: PluginManifestCacheEntry | null = null;
+
+function safeMtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 /**
- * Resolve a bare skill slug to its marketplace plugin namespace (`pluginName:slug`).
- *
- * The SDK namespaces plugin skills by the plugin manifest's `name` field, NOT by
- * the marketplace install key (e.g. install key `jira@ai-tools-engineering` →
- * plugin name `jira` → skill `jira:jira`). This scans each enabled plugin's
- * declared skill directories for `{slug}/SKILL.md`.
- *
- * @returns `${pluginName}:${bareSlug}` if a matching enabled plugin skill exists, else null.
+ * Normalize and validate plugin-declared skill roots, keeping only relative
+ * directories that resolve inside the plugin install dir. Rejects absolute
+ * paths and `..` traversal so a manifest can't make existence checks escape
+ * its own directory. Defaults to the conventional `skills/` when unspecified.
  */
-export function resolveMarketplacePluginSkill(bareSlug: string): string | null {
+function sanitizeSkillDirs(rawSkills: unknown, installPath: string): string[] {
+  const candidates = Array.isArray(rawSkills) && rawSkills.length > 0
+    ? rawSkills.filter((d): d is string => typeof d === 'string')
+    : ['skills'];
+
+  const root = resolve(installPath);
+  const safe: string[] = [];
+  for (const dir of candidates) {
+    if (!dir || isAbsolute(dir)) continue;
+    const resolved = resolve(root, dir);
+    if (resolved !== root && !resolved.startsWith(root + sep)) continue;
+    safe.push(dir);
+  }
+  return safe;
+}
+
+/**
+ * Parsed manifests of all enabled marketplace plugins, memoized by the mtimes
+ * of installed_plugins.json + settings.json. Honors CRAFT_DISABLE_CLAUDE_PLUGINS=1.
+ */
+function getEnabledPluginManifests(): EnabledPluginManifest[] {
+  if (process.env.CRAFT_DISABLE_CLAUDE_PLUGINS === '1') return [];
+
+  const claudeHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+  const installedMtimeMs = safeMtimeMs(join(claudeHome, 'plugins', 'installed_plugins.json'));
+  const settingsMtimeMs = safeMtimeMs(join(claudeHome, 'settings.json'));
+
+  if (
+    manifestCache &&
+    manifestCache.configDir === claudeHome &&
+    manifestCache.installedMtimeMs === installedMtimeMs &&
+    manifestCache.settingsMtimeMs === settingsMtimeMs
+  ) {
+    return manifestCache.plugins;
+  }
+
+  const plugins: EnabledPluginManifest[] = [];
   for (const { installPath } of readEnabledPluginInstallPaths()) {
     try {
       const manifestPath = join(installPath, '.claude-plugin', 'plugin.json');
       if (!existsSync(manifestPath)) continue;
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { name?: string; skills?: unknown };
       if (!manifest.name) continue;
-
-      // Plugin manifests declare skill roots in `skills` (e.g. ["./skills/"]);
-      // default to the conventional `skills/` directory when unspecified.
-      const skillDirs = Array.isArray(manifest.skills) && manifest.skills.length > 0
-        ? manifest.skills.filter((d): d is string => typeof d === 'string')
-        : ['skills'];
-
-      for (const dir of skillDirs) {
-        if (existsSync(join(installPath, dir, bareSlug, 'SKILL.md'))) {
-          return `${manifest.name}:${bareSlug}`;
-        }
-      }
+      const skillDirs = sanitizeSkillDirs(manifest.skills, installPath);
+      if (skillDirs.length === 0) continue;
+      plugins.push({ installPath, name: manifest.name, skillDirs });
     } catch {
       // Skip unreadable/malformed plugin manifest
+    }
+  }
+
+  manifestCache = { configDir: claudeHome, installedMtimeMs, settingsMtimeMs, plugins };
+  return plugins;
+}
+
+/**
+ * Resolve a bare skill slug to its marketplace plugin namespace (`pluginName:slug`).
+ *
+ * The SDK namespaces plugin skills by the plugin manifest's `name` field, NOT by
+ * the marketplace install key (e.g. install key `jira@ai-tools-engineering` →
+ * plugin name `jira` → skill `jira:jira`). Scans each enabled plugin's validated
+ * skill directories for `{slug}/SKILL.md`.
+ *
+ * @returns `${pluginName}:${bareSlug}` if a matching enabled plugin skill exists, else null.
+ */
+export function resolveMarketplacePluginSkill(bareSlug: string): string | null {
+  for (const { installPath, name, skillDirs } of getEnabledPluginManifests()) {
+    for (const dir of skillDirs) {
+      if (existsSync(join(installPath, dir, bareSlug, 'SKILL.md'))) {
+        return `${name}:${bareSlug}`;
+      }
     }
   }
   return null;
