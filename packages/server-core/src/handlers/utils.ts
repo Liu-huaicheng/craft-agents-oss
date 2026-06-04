@@ -96,10 +96,20 @@ export async function validateFilePath(
     realFilePath = normalizedPath
   }
 
-  // Define allowed base directories
+  // Define allowed base directories.
+  // macOS quirk: /tmp is a symlink to /private/tmp, and realpath() above already
+  // resolved any user-supplied "/tmp/..." to "/private/tmp/...". Meanwhile
+  // os.tmpdir() on macOS returns a per-user folder under /var/folders (or
+  // whatever $TMPDIR currently points at), which doesn't match either form.
+  // Include both literal "/tmp" and "/private/tmp" so callers writing to the
+  // conventional /tmp location are accepted. On Linux these are real dirs
+  // (/tmp matches tmpdir() in practice, /private/tmp is a harmless no-op).
+  // On Windows neither path exists, so they remain inert.
   const allowedDirs = [
     homedir(),
     tmpdir(),
+    '/tmp',
+    '/private/tmp',
     ...(additionalAllowedDirs ?? []),
   ].filter(Boolean)
 
