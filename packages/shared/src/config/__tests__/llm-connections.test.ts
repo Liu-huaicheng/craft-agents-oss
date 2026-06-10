@@ -135,6 +135,7 @@ describe('isPiProvider', () => {
 
 describe('toBedrockNativeId', () => {
   it('maps bare Anthropic IDs to US inference profile IDs', () => {
+    expect(toBedrockNativeId('claude-fable-5')).toBe('us.anthropic.claude-fable-5')
     expect(toBedrockNativeId('claude-opus-4-8')).toBe('us.anthropic.claude-opus-4-8')
     expect(toBedrockNativeId('claude-sonnet-4-6')).toBe('us.anthropic.claude-sonnet-4-6')
     expect(toBedrockNativeId('claude-haiku-4-5-20251001')).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0')
@@ -206,13 +207,14 @@ describe('Bedrock preferred defaults ordering', () => {
     const models = getDefaultModelsForConnection('pi', 'amazon-bedrock')
     if (models.length === 0) return // Pi resolver not registered in test env
     const firstId = typeof models[0] === 'string' ? models[0] : (models[0] as any).id
-    // First model should be a preferred model (claude-opus or claude-sonnet), not a deprecated one
-    expect(firstId).toMatch(/claude-(opus|sonnet)-4/)
+    // First model should be a preferred model (claude-fable/opus/sonnet), not a deprecated one
+    expect(firstId).toMatch(/claude-(fable-5|(opus|sonnet)-4)/)
   })
 })
 
 describe('fromBedrockNativeId', () => {
   it('maps US inference profile IDs back to bare Anthropic', () => {
+    expect(fromBedrockNativeId('us.anthropic.claude-fable-5')).toBe('claude-fable-5')
     expect(fromBedrockNativeId('us.anthropic.claude-opus-4-8')).toBe('claude-opus-4-8')
     expect(fromBedrockNativeId('us.anthropic.claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
     expect(fromBedrockNativeId('us.anthropic.claude-haiku-4-5-20251001-v1:0')).toBe('claude-haiku-4-5-20251001')

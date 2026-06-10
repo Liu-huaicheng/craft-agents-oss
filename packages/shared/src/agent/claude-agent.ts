@@ -147,9 +147,14 @@ export function resolveClaudeThinkingOptions(args: {
   const isClaude = isClaudeModel(model);
   const effort = THINKING_TO_EFFORT[thinkingLevel];
   const isHaiku = model.toLowerCase().includes('haiku');
+  // Fable models reject an explicit thinking: { type: 'disabled' } with a 400
+  // (accepted on Opus 4.7/4.8) — omitting the thinking param is the only way
+  // to run them without thinking.
+  const isFable = model.toLowerCase().includes('fable');
   const supportsAdaptiveThinking = isClaude && !isHaiku;
 
   if (minimizeThinking || !isClaude || !effort) {
+    if (isFable) return {};
     return supportsAdaptiveThinking
       ? { thinking: { type: 'disabled' as const } }
       : { maxThinkingTokens: 0 };

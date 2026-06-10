@@ -14,6 +14,7 @@ describe('isClaudeModel', () => {
   // Direct Anthropic model IDs
   it('detects direct Anthropic Claude model IDs', () => {
     expect(isClaudeModel('claude-sonnet-4-6')).toBe(true);
+    expect(isClaudeModel('claude-fable-5')).toBe(true);
     expect(isClaudeModel('claude-opus-4-8')).toBe(true);
     expect(isClaudeModel('claude-haiku-4-5-20251001')).toBe(true);
     expect(isClaudeModel('claude-3-5-sonnet-20241022')).toBe(true);
@@ -62,6 +63,7 @@ describe('isClaudeModel', () => {
 
 describe('getModelShortName', () => {
   it('returns registry shortName for known models', () => {
+    expect(getModelShortName('claude-fable-5')).toBe('Fable');
     expect(getModelShortName('claude-opus-4-8')).toBe('Opus');
     expect(getModelShortName('claude-sonnet-4-6')).toBe('Sonnet');
     expect(getModelShortName('claude-haiku-4-5-20251001')).toBe('Haiku');

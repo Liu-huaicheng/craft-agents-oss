@@ -520,6 +520,7 @@
   "mode.exploreFullDesc": "只读探索。阻止写入，无需确认。",
   "mode.exploreShort": "探索",
   "mode.safe": "探索",
+  "model.fableDesc": "最强大，攻克最难问题",
   "model.haikuDesc": "快速回答",
   "model.opusDesc": "最能胜任复杂工作",
   "model.sonnetDesc": "最适合日常任务",

@@ -520,6 +520,7 @@
   "mode.exploreFullDesc": "Nur-Lese-Erkundung. Blockiert Schreibvorgänge, keine Rückfragen.",
   "mode.exploreShort": "Erkunden",
   "mode.safe": "Erkunden",
+  "model.fableDesc": "Am leistungsstärksten für die schwierigsten Probleme",
   "model.haikuDesc": "Am schnellsten für kurze Antworten",
   "model.opusDesc": "Leistungsstärkste für komplexe Aufgaben",
   "model.sonnetDesc": "Ideal für alltägliche Aufgaben",

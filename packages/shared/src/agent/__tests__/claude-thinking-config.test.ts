@@ -69,6 +69,31 @@ describe('resolveClaudeThinkingOptions', () => {
     })
   })
 
+  it('uses adaptive thinking + effort for Fable models', () => {
+    const result = resolveClaudeThinkingOptions({
+      thinkingLevel: 'high',
+      model: 'claude-fable-5',
+      providerType: 'anthropic',
+      minimizeThinking: false,
+    })
+
+    expect(result).toEqual({
+      thinking: { type: 'adaptive' },
+      effort: 'high',
+    })
+  })
+
+  it('omits the thinking param entirely when off on Fable models (explicit disabled is a 400)', () => {
+    const result = resolveClaudeThinkingOptions({
+      thinkingLevel: 'off',
+      model: 'claude-fable-5',
+      providerType: 'anthropic',
+      minimizeThinking: false,
+    })
+
+    expect(result).toEqual({})
+  })
+
   it('passes xhigh as effort on adaptive backends (Opus 4.7+)', () => {
     const result = resolveClaudeThinkingOptions({
       thinkingLevel: 'xhigh',
