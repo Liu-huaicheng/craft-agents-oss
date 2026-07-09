@@ -48,7 +48,7 @@ import {
 import { permissionsConfigCache, type PermissionsContext } from '../permissions-config.ts';
 import type { PrerequisiteCheckResult } from './prerequisite-manager.ts';
 import { rewriteBashWithRtk } from './rtk-rewrite.ts';
-import { resolveMarketplacePluginSkill } from '../claude-plugins.ts';
+import { resolveMarketplacePluginSkill, isEnabledMarketplacePluginSkill } from '../claude-plugins.ts';
 
 // ============================================================
 // TYPES
@@ -198,15 +198,18 @@ export function expandToolPaths(
  * Ensure skill names are fully-qualified with the correct plugin prefix.
  *
  * The SDK resolves skills as `pluginName:skillSlug` where the plugin name is
- * read from `.claude-plugin/plugin.json` `name` field. Skills can live in 3 tiers:
- *   1. Workspace: {workspaceRoot}/skills/{slug}/ → plugin name from plugin.json
- *   2. Project:   {workingDir}/.agents/skills/{slug}/ → plugin name = ".agents"
- *   3. Global:    ~/.agents/skills/{slug}/ → plugin name = ".agents"
+ * read from `.claude-plugin/plugin.json` `name` field. Skills can live in 4 tiers,
+ * resolved in this order (SDK-known namespaces first):
+ *   1. Workspace:   {workspaceRoot}/skills/{slug}/ → plugin name from plugin.json
+ *   2. Marketplace: enabled Claude Code CLI plugins → plugin name from manifest
+ *   3. Project:     {workingDir}/.agents/skills/{slug}/ → plugin name = ".agents"
+ *   4. Global:      ~/.agents/skills/{slug}/ → plugin name = ".agents"
  *
  * This function resolves the bare slug to the correct plugin prefix by checking
  * which directory actually contains the skill. It also handles re-qualifying
  * skills that were incorrectly qualified by the UI (which always uses the
- * workspace slug, even for global/project skills).
+ * workspace slug, even for global/project skills). An input whose qualifier
+ * already verifiably resolves (workspace or marketplace) is kept as-is.
  *
  * @param input - The Skill tool input ({ skill: string, args?: string })
  * @param workspaceSlug - The workspace slug (from .claude-plugin/plugin.json name)
@@ -228,6 +231,25 @@ export function qualifySkillName(
   // Extract the bare slug — strip any existing qualifier (e.g. "CraftAgentWS:commit" → "commit")
   const bareSlug = skill.includes(':') ? skill.split(':').pop()! : skill;
   if (!bareSlug) return { modified: false, input };
+
+  // A qualifier that verifiably resolves is authoritative — keep it instead of
+  // re-resolving from the bare slug. Otherwise a correct marketplace name
+  // (e.g. `db-lens:db-lens`) gets hijacked by a same-slug ~/.agents skill into
+  // the `.agents:` namespace, which the SDK rejects as `Unknown command`.
+  // `.agents:` itself is excluded: it is never registered with the SDK, so an
+  // input already carrying it must be re-resolved to an SDK-known namespace.
+  if (skill.includes(':')) {
+    const prefix = skill.slice(0, skill.lastIndexOf(':'));
+    if (prefix && prefix !== AGENTS_PLUGIN_NAME) {
+      const isValidWorkspaceSkill =
+        prefix === workspaceSlug &&
+        !!workspaceRootPath &&
+        existsSync(join(workspaceRootPath, 'skills', bareSlug, 'SKILL.md'));
+      if (isValidWorkspaceSkill || isEnabledMarketplacePluginSkill(prefix, bareSlug)) {
+        return { modified: false, input };
+      }
+    }
+  }
 
   // If we don't have the workspace root path, fall back to simple workspace-only qualification
   if (!workspaceRootPath) {
@@ -262,24 +284,19 @@ function resolveSkillPlugin(
   workspaceRootPath: string,
   workingDirectory?: string,
 ): string {
-  // Priority order matches loadAllSkills: project (highest) > workspace > global (lowest)
+  // SDK-known namespaces first. The `.agents` namespace (project/global tiers)
+  // is never registered with the SDK as a plugin, so a `.agents:{slug}` Skill
+  // call is rejected as `Unknown command`. When the slug also exists in a
+  // namespace the SDK can resolve (workspace plugin or an enabled marketplace
+  // plugin), that copy must win even though loadAllSkills ranks project/global
+  // `.agents` skills higher — running the SDK-known copy beats erroring.
 
-  // 1. Project: {workingDir}/.agents/skills/{slug}/SKILL.md
-  if (workingDirectory && existsSync(join(workingDirectory, PROJECT_AGENT_SKILLS_DIR, bareSlug, 'SKILL.md'))) {
-    return `${AGENTS_PLUGIN_NAME}:${bareSlug}`;
-  }
-
-  // 2. Workspace: {workspaceRoot}/skills/{slug}/SKILL.md
+  // 1. Workspace: {workspaceRoot}/skills/{slug}/SKILL.md
   if (existsSync(join(workspaceRootPath, 'skills', bareSlug, 'SKILL.md'))) {
     return `${workspaceSlug}:${bareSlug}`;
   }
 
-  // 3. Global: ~/.agents/skills/{slug}/SKILL.md
-  if (existsSync(join(GLOBAL_AGENT_SKILLS_DIR, bareSlug, 'SKILL.md'))) {
-    return `${AGENTS_PLUGIN_NAME}:${bareSlug}`;
-  }
-
-  // 4. Marketplace plugin: Claude Code CLI-installed plugins enabled in
+  // 2. Marketplace plugin: Claude Code CLI-installed plugins enabled in
   //    ~/.claude/settings.json. These are namespaced by the plugin manifest's
   //    `name` (e.g. `jira:jira`), not the workspace slug. Without this, an
   //    enabled plugin skill falls through to the workspace fallback below and
@@ -287,6 +304,16 @@ function resolveSkillPlugin(
   const marketplaceSkill = resolveMarketplacePluginSkill(bareSlug);
   if (marketplaceSkill) {
     return marketplaceSkill;
+  }
+
+  // 3. Project: {workingDir}/.agents/skills/{slug}/SKILL.md
+  if (workingDirectory && existsSync(join(workingDirectory, PROJECT_AGENT_SKILLS_DIR, bareSlug, 'SKILL.md'))) {
+    return `${AGENTS_PLUGIN_NAME}:${bareSlug}`;
+  }
+
+  // 4. Global: ~/.agents/skills/{slug}/SKILL.md
+  if (existsSync(join(GLOBAL_AGENT_SKILLS_DIR, bareSlug, 'SKILL.md'))) {
+    return `${AGENTS_PLUGIN_NAME}:${bareSlug}`;
   }
 
   // Fallback: assume workspace plugin (original behavior)
