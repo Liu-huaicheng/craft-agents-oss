@@ -7,6 +7,17 @@ export interface SetSessionStatusArgs {
   status: string;
 }
 
+/**
+ * Whether agent-driven closed-status transitions are allowed. By default the
+ * human owns closure; deployments that want the agent to close tasks itself
+ * (e.g. fully autonomous boards) can opt in via CRAFT_ALLOW_AGENT_CLOSE=1.
+ * Read at call time so tests and long-lived processes see env changes.
+ */
+export function isAgentCloseAllowed(): boolean {
+  const v = process.env.CRAFT_ALLOW_AGENT_CLOSE;
+  return v === '1' || v === 'true';
+}
+
 export async function handleSetSessionStatus(
   ctx: SessionToolContext,
   args: SetSessionStatusArgs
@@ -32,7 +43,7 @@ export async function handleSetSessionStatus(
       // NOTE: this guards only the interactive tool path; the Tasks Conductor
       // sets terminal statuses through SessionManager.setSessionStatus directly,
       // so automated DAG runs are unaffected.
-      if (category === 'closed') {
+      if (category === 'closed' && !isAgentCloseAllowed()) {
         return errorResponse(
           `Refusing to set the closed status "${resolved}". Closing a task (done/cancelled) is the user's decision — leave it for them to do on the board. If the work is ready for review, set an open status such as "needs-review" instead.`
         );
