@@ -249,11 +249,13 @@ describe('qualifySkillName with filesystem resolution', () => {
     expect(result.input).toEqual({ skill: `${AGENTS_PLUGIN_NAME}:proj-only` })
   })
 
-  it('project skill takes priority over workspace skill (same slug)', () => {
+  it('workspace skill takes priority over project skill (same slug)', () => {
     const result = qualifySkillName({ skill: 'shared-skill' }, workspaceSlug, workspaceRoot, projectDir)
     expect(result.modified).toBe(true)
-    // Project has higher priority than workspace — should resolve to .agents:
-    expect(result.input).toEqual({ skill: `${AGENTS_PLUGIN_NAME}:shared-skill` })
+    // The `.agents` namespace is not registered with the SDK, so when a slug
+    // also exists in an SDK-known namespace (workspace), that copy must win —
+    // resolving to `.agents:` would be rejected as `Unknown command`.
+    expect(result.input).toEqual({ skill: 'my-workspace:shared-skill' })
   })
 
   it('re-qualifies incorrectly qualified skill (workspace prefix for project skill)', () => {
@@ -294,6 +296,7 @@ describe('qualifySkillName with marketplace plugin resolution', () => {
   const testDir = join(tmpdir(), `skill-marketplace-test-${Date.now()}`)
   const claudeHome = join(testDir, '.claude')
   const workspaceRoot = join(testDir, 'my-workspace')
+  const projectDir = join(testDir, 'my-project')
   const workspaceSlug = 'my-workspace'
   const prevConfigDir = process.env.CLAUDE_CONFIG_DIR
   const prevDisable = process.env.CRAFT_DISABLE_CLAUDE_PLUGINS
@@ -312,6 +315,11 @@ describe('qualifySkillName with marketplace plugin resolution', () => {
     // Same plugin also ships "mkt-overlap" to verify workspace tier wins
     mkdirSync(join(enabledInstall, 'skills', 'mkt-overlap'), { recursive: true })
     writeFileSync(join(enabledInstall, 'skills', 'mkt-overlap', 'SKILL.md'), '---\nname: Plugin Overlap\ndescription: test\n---\n')
+
+    // Project .agents skill with the same slug as the marketplace skill —
+    // reproduces the `Unknown command: .agents:db-lens` hijack scenario
+    mkdirSync(join(projectDir, '.agents', 'skills', 'mkt-skill'), { recursive: true })
+    writeFileSync(join(projectDir, '.agents', 'skills', 'mkt-skill', 'SKILL.md'), '---\nname: Agents Shadow\ndescription: test\n---\n')
 
     // Disabled marketplace plugin with skill "mkt-hidden"
     const disabledInstall = join(claudeHome, 'plugins', 'cache', 'market', 'mkt-secret', '1.0.0')
@@ -360,6 +368,26 @@ describe('qualifySkillName with marketplace plugin resolution', () => {
     // "{workspaceSlug}:mkt-skill" must be rewritten to "mkt-plugin:mkt-skill",
     // not left as an unknown workspace-namespaced command.
     const result = qualifySkillName({ skill: 'my-workspace:mkt-skill' }, workspaceSlug, workspaceRoot)
+    expect(result.modified).toBe(true)
+    expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
+  })
+
+  it('prefers an enabled marketplace skill over a same-slug .agents skill', () => {
+    // `.agents:` is not an SDK-registered namespace — resolving there when the
+    // marketplace copy exists produced `Unknown command: .agents:{slug}`.
+    const result = qualifySkillName({ skill: 'mkt-skill' }, workspaceSlug, workspaceRoot, projectDir)
+    expect(result.modified).toBe(true)
+    expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
+  })
+
+  it('keeps a correctly qualified marketplace skill despite a same-slug .agents skill', () => {
+    const result = qualifySkillName({ skill: 'mkt-plugin:mkt-skill' }, workspaceSlug, workspaceRoot, projectDir)
+    expect(result.modified).toBe(false)
+    expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
+  })
+
+  it('re-qualifies a .agents-prefixed skill to the marketplace namespace', () => {
+    const result = qualifySkillName({ skill: `${AGENTS_PLUGIN_NAME}:mkt-skill` }, workspaceSlug, workspaceRoot, projectDir)
     expect(result.modified).toBe(true)
     expect(result.input).toEqual({ skill: 'mkt-plugin:mkt-skill' })
   })

@@ -196,3 +196,21 @@ export function resolveMarketplacePluginSkill(bareSlug: string): string | null {
   }
   return null;
 }
+
+/**
+ * Check whether `pluginName:bareSlug` names a skill shipped by an enabled
+ * marketplace plugin. Unlike resolveMarketplacePluginSkill (first match wins),
+ * this validates a specific plugin/skill pair, so an already-qualified Skill
+ * call can be verified without being re-resolved to a different plugin.
+ */
+export function isEnabledMarketplacePluginSkill(pluginName: string, bareSlug: string): boolean {
+  for (const { installPath, name, skillDirs } of getEnabledPluginManifests()) {
+    if (name !== pluginName) continue;
+    for (const dir of skillDirs) {
+      if (existsSync(join(installPath, dir, bareSlug, 'SKILL.md'))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
