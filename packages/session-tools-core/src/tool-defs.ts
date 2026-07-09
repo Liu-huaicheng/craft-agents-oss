@@ -482,9 +482,13 @@ Pass an empty array to clear all labels. Omit sessionId to target the current se
   set_session_status: `Set the status of the current session or a specific session by ID (e.g., "todo", "in_progress").
 
 Use this to reflect progress or trigger status-based automations (SessionStatusChange events).
-Omit sessionId to target the current session.
+Omit sessionId to target the current session.${
+    process.env.CRAFT_ALLOW_AGENT_CLOSE === '1' || process.env.CRAFT_ALLOW_AGENT_CLOSE === 'true'
+      ? ''
+      : `
 
-IMPORTANT: never move a task into a closed status (such as "done" or "cancelled") yourself — closing a task is the user's decision, made on the board. You may prepare and hand off work by setting an open status like "needs-review"; the user reviews and closes it. Closed-status calls are rejected.`,
+IMPORTANT: never move a task into a closed status (such as "done" or "cancelled") yourself — closing a task is the user's decision, made on the board. You may prepare and hand off work by setting an open status like "needs-review"; the user reviews and closes it. Closed-status calls are rejected.`
+  }`,
 
   archive_session: `Archive or unarchive another session in this workspace by ID.
 

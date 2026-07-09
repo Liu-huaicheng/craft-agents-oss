@@ -59,4 +59,32 @@ describe('handleSetSessionStatus — closed-status guard', () => {
     expect(result.content[0]?.text).toContain('Unknown status');
     expect(sets).toHaveLength(0);
   });
+
+  it('allows a closed status when CRAFT_ALLOW_AGENT_CLOSE=1', async () => {
+    const prev = process.env.CRAFT_ALLOW_AGENT_CLOSE;
+    process.env.CRAFT_ALLOW_AGENT_CLOSE = '1';
+    try {
+      const { ctx, sets } = createCtx();
+      const result = await handleSetSessionStatus(ctx, { status: 'done' });
+      expect(result.isError).toBeFalsy();
+      expect(sets).toEqual([{ sessionId: undefined, status: 'done' }]);
+    } finally {
+      if (prev === undefined) delete process.env.CRAFT_ALLOW_AGENT_CLOSE;
+      else process.env.CRAFT_ALLOW_AGENT_CLOSE = prev;
+    }
+  });
+
+  it('still rejects a closed status when CRAFT_ALLOW_AGENT_CLOSE is unset or falsy', async () => {
+    const prev = process.env.CRAFT_ALLOW_AGENT_CLOSE;
+    process.env.CRAFT_ALLOW_AGENT_CLOSE = '0';
+    try {
+      const { ctx, sets } = createCtx();
+      const result = await handleSetSessionStatus(ctx, { status: 'done' });
+      expect(result.isError).toBe(true);
+      expect(sets).toHaveLength(0);
+    } finally {
+      if (prev === undefined) delete process.env.CRAFT_ALLOW_AGENT_CLOSE;
+      else process.env.CRAFT_ALLOW_AGENT_CLOSE = prev;
+    }
+  });
 });
