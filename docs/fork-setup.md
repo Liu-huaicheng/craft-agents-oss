@@ -24,15 +24,22 @@ bun install
 
 ## 3. 构建
 
-Server 启动前需要先构建两个子进程 bundle（session MCP server + Pi agent server），以及 WebUI 静态资源（如需浏览器访问）：
+**Server 后端本身不需要构建**——launcher 直接 `bun run packages/server/src/index.ts` 跑源码，改动 server / shared 代码只需重启。真正需要构建的只有两个产物（正是 `server:prod` 启动前构建的那两个）：
 
 ```bash
-# 子进程 bundle（必须）
+# 1. 子进程 bundle（必须）：per-session agent 子进程运行的是 packages/pi-agent-server/dist
+#    的 built 产物而非源码，改动 pi-agent-server / session-mcp-server 后必须重建
 bun run server:build:subprocess
 
-# WebUI（可选，浏览器访问时需要）
-bun run webui:build
+# 2. WebUI（可选，浏览器访问时需要）：必须带 heap flag，见下方说明
+NODE_OPTIONS="--max-old-space-size=8192" bun run webui:build
 ```
+
+注意事项（踩坑记录）：
+
+- **根目录 `bun run build` 是坏的**，`scripts/build.ts` 在仓库里不存在（v0.10.4 / v0.10.5 均如此），不要用它来构建 server。
+- **WebUI 构建必须加 `NODE_OPTIONS="--max-old-space-size=8192"`**：`vite build` 的 vite 二进制跑在 node 下（非 bun），bundle 很大（约 5200 个 module，主 JS ≈ 5MB），默认堆会 OOM——症状是一大段 V8 C++ 堆栈后 `SIGABRT`，看起来像工具链坏了，其实只是内存不够。加 8GB 堆后约 25-30s 构建完成。
+- WebUI 的 `emptyOutDir` 是关闭的：构建失败**不会**破坏现有 `dist/`，线上 WebUI 会继续用旧 bundle 直到构建成功；副作用是 `dist/assets/` 会积累旧的 hashed chunk（无害，`index.html` 只引用当前版本）。
 
 ## 4. 配置 AI Provider（只含 Claude Code）
 
@@ -178,6 +185,8 @@ CRAFT_SERVER_TOKEN=<token>
 
 然后发起一个 session 验证 Claude Code 认证链路：如果子进程能正常回复，说明 keychain 继承成功；若报认证错误，先在同一台机器的终端里跑一次 `claude` 确认登录态，再从 GUI/终端会话重启 server。
 
+若通过隧道（frp/ngrok）暴露 WebUI，可用 `curl -sI https://<your-tunnel-domain>/` 验证——预期 `302`（跳转 `/login`）。如果返回 **`426 Upgrade Required`**，说明 server 是以「纯 WebSocket 模式」裸启动的（缺 `CRAFT_WEBUI_DIR`），`ws` 库对浏览器的 HTTP GET 一律回 426——隧道本身没坏，是启动方式错了，见下一节。
+
 ## 7. 客户端接入
 
 | 方式 | 命令 / 入口 |
@@ -188,9 +197,16 @@ CRAFT_SERVER_TOKEN=<token>
 
 ## 8. 日常维护
 
+**重启铁律：永远通过 launcher 脚本重启，绝不裸跑 `bun run packages/server/src/index.ts`。** 裸启动会丢掉脚本里的关键环境变量，且是静默失败：
+
+- 缺 `CRAFT_WEBUI_DIR` → HTTP WebUI 不挂载，浏览器 GET 全部收到 `426 Upgrade Required`，公网隧道地址看起来"坏了"其实只是忠实转发 426
+- 缺 `CRAFT_WEBUI_WS_URL` → WebUI 会去连 localhost 而不是隧道地址
+- 缺 `CRAFT_SERVER_TOKEN` + `source ~/.zshenv` → agent 子进程拿不到各类工具凭据（API token、keychain audit session 等），agent 内 CLI 工具全部失败
+
 ```bash
-# 重启：kill 后重跑启动脚本（脚本自带端口幂等检查）
-kill $(lsof -tiTCP:9100 -sTCP:LISTEN); ~/.craft-agent/start-server.sh
+# 重启：kill 后重跑启动脚本（脚本自带端口幂等检查，port 在监听时会 no-op，
+# 所以想真正重启必须先 kill）
+kill $(lsof -tiTCP:9100 -sTCP:LISTEN); bash ~/.craft-agent/start-server.sh
 
 # 同步 upstream
 git fetch upstream && git merge upstream/main
@@ -198,6 +214,14 @@ git fetch upstream && git merge upstream/main
 # 更新依赖 + 重新构建子进程 bundle 后再重启
 bun install && bun run server:build:subprocess
 ```
+
+改动后需要哪些动作速查：
+
+| 改了什么 | 需要 |
+|---|---|
+| `packages/server` / `packages/shared` 等后端源码 | 只需重启（跑源码，无构建） |
+| `packages/pi-agent-server` / `packages/session-mcp-server` | `bun run server:build:subprocess` + 重启 |
+| `apps/webui` / `packages/ui` | `NODE_OPTIONS="--max-old-space-size=8192" bun run webui:build`（server 可不重启，刷新页面即可） |
 
 注意事项：
 
