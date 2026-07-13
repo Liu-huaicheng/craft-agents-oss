@@ -15,8 +15,8 @@
 ## 2. 克隆与安装依赖
 
 ```bash
-git clone git@github.com:Liu-huaicheng/craft-agents-oss.git ~/huaicheng-workspace/craft-agents-oss
-cd ~/huaicheng-workspace/craft-agents-oss
+git clone git@github.com:Liu-huaicheng/craft-agents-oss.git ~/craft-agents-oss
+cd ~/craft-agents-oss
 git remote add upstream https://github.com/craft-ai-agents/craft-agents-oss.git
 
 bun install
@@ -119,15 +119,15 @@ source "$HOME/.zshenv"
 export CRAFT_SERVER_TOKEN=<generate: openssl rand -hex 24>
 export CRAFT_RPC_HOST=127.0.0.1
 export CRAFT_RPC_PORT=9100
-export CRAFT_WEBUI_DIR=$HOME/huaicheng-workspace/craft-agents-oss/apps/webui/dist
-export CRAFT_BUNDLED_ASSETS_ROOT=$HOME/huaicheng-workspace/craft-agents-oss/apps/electron
+export CRAFT_WEBUI_DIR=$HOME/craft-agents-oss/apps/webui/dist
+export CRAFT_BUNDLED_ASSETS_ROOT=$HOME/craft-agents-oss/apps/electron
 # Optional: public WS endpoint if exposing WebUI through a tunnel (frp/ngrok)
 # export CRAFT_WEBUI_WS_URL=wss://<your-tunnel-domain>
 # Fork-local switch: allow agent to set closed statuses (done/cancelled)
 # via set_session_status — see packages/session-tools-core/src/handlers/set-session-status.ts
 export CRAFT_ALLOW_AGENT_CLOSE=1
 
-WORKDIR=$HOME/huaicheng-workspace/craft-agents-oss
+WORKDIR=$HOME/craft-agents-oss
 LOG=/tmp/craft-agents.log
 BUN=/opt/homebrew/bin/bun
 
