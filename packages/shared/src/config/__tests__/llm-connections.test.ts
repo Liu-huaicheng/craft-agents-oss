@@ -145,6 +145,15 @@ describe('toBedrockNativeId', () => {
     expect(fromBedrockNativeId('us.anthropic.claude-opus-4-7')).toBe('claude-opus-4-7')
   })
 
+  it('maps Opus 5 forward and reverse across regions and base IDs', () => {
+    expect(toBedrockNativeId('claude-opus-5')).toBe('us.anthropic.claude-opus-5')
+    expect(toBedrockNativeId('claude-opus-5', 'eu')).toBe('eu.anthropic.claude-opus-5')
+    expect(toBedrockNativeId('anthropic.claude-opus-5')).toBe('us.anthropic.claude-opus-5')
+    expect(fromBedrockNativeId('us.anthropic.claude-opus-5')).toBe('claude-opus-5')
+    expect(fromBedrockNativeId('eu.anthropic.claude-opus-5')).toBe('claude-opus-5')
+    expect(fromBedrockNativeId('global.anthropic.claude-opus-5')).toBe('claude-opus-5')
+  })
+
   it('maps Sonnet 5 forward and reverse across regions and base IDs', () => {
     expect(toBedrockNativeId('claude-sonnet-5')).toBe('us.anthropic.claude-sonnet-5')
     expect(toBedrockNativeId('claude-sonnet-5', 'eu')).toBe('eu.anthropic.claude-sonnet-5')
@@ -334,8 +343,8 @@ describe('Claude Fable 5', () => {
     expect(isClaudeModel('claude-fable-5')).toBe(true)
   })
 
-  it('does NOT become the Anthropic default (Opus 4.8 stays default)', () => {
-    expect(getDefaultModelForConnection('anthropic')).toBe('claude-opus-4-8')
+  it('does NOT become the Anthropic default (Opus 5 stays default)', () => {
+    expect(getDefaultModelForConnection('anthropic')).toBe('claude-opus-5')
   })
 
   it('round-trips through the Bedrock inference-profile mapping', () => {
