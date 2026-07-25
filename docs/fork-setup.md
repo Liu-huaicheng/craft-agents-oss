@@ -68,20 +68,20 @@ NODE_OPTIONS="--max-old-space-size=8192" bun run webui:build
           "contextWindow": 1000000
         },
         {
-          "id": "claude-opus-4-8",
-          "name": "Opus 4.8",
+          "id": "claude-opus-5",
+          "name": "Opus 5",
           "shortName": "Opus",
           "description": "Most capable for complex work",
           "provider": "anthropic",
           "contextWindow": 1000000
         },
         {
-          "id": "claude-sonnet-4-6",
-          "name": "Sonnet 4.6",
+          "id": "claude-sonnet-5",
+          "name": "Sonnet 5",
           "shortName": "Sonnet",
-          "description": "Best for everyday tasks",
+          "description": "Best combination of speed and intelligence",
           "provider": "anthropic",
-          "contextWindow": 200000
+          "contextWindow": 1000000
         },
         {
           "id": "claude-haiku-4-5-20251001",
@@ -92,7 +92,7 @@ NODE_OPTIONS="--max-old-space-size=8192" bun run webui:build
           "contextWindow": 200000
         }
       ],
-      "defaultModel": "claude-opus-4-8",
+      "defaultModel": "claude-opus-5",
       "midStreamBehavior": "queue"
     }
   ],
@@ -103,7 +103,7 @@ NODE_OPTIONS="--max-old-space-size=8192" bun run webui:build
 要点：
 
 - `authType: "environment"` — server 不管理凭据（`credentials.enc` 里不存 key），认证完全交给 Claude Code 子进程自己。代码路径见 `packages/shared/src/config/llm-connections.ts` 的 `resolveAuthEnvVars()`：environment 分支直接返回，不注入任何环境变量。
-- `enable1MContext: true` — Fable 5 / Opus 4.8 走 1M context window。
+- `enable1MContext: true` — Fable 5 / Opus 5 / Sonnet 5 走 1M context window。
 - `midStreamBehavior: "queue"` — 流式回复中途发消息时排队到下一轮（anthropic provider 的默认值）。
 - 不要添加其它 `llmConnections` 条目即可保证「只有 Claude Code」。
 
