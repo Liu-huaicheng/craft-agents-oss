@@ -97,16 +97,16 @@ describe('getModelShortName', () => {
 });
 
 describe('Opus registry', () => {
-  it('includes Opus 5 and keeps Opus 4.8/4.7, but excludes deprecated Opus 4.6', () => {
+  it('includes Opus 5 and keeps Opus 4.8/4.7 plus the restored Opus 4.6', () => {
     const ids = ANTHROPIC_MODELS.map(m => m.id);
     expect(ids).toContain('claude-opus-5');
     expect(ids).toContain('claude-opus-4-8');
     expect(ids).toContain('claude-opus-4-7');
-    expect(ids).not.toContain('claude-opus-4-6');
+    expect(ids).toContain('claude-opus-4-6');
   });
 
-  it('resolves "Opus" shortName to Opus 5', () => {
-    expect(getModelIdByShortName('Opus')).toBe('claude-opus-5');
+  it('resolves "Opus" shortName to 4.8', () => {
+    expect(getModelIdByShortName('Opus')).toBe('claude-opus-4-8');
   });
 
   it('exposes Opus 5 metadata', () => {
@@ -122,11 +122,12 @@ describe('Opus registry', () => {
     expect(getModelById('anthropic.claude-opus-5')?.id).toBe('claude-opus-5');
   });
 
-  it('normalizes deprecated Opus IDs to Opus 4.8 without migrating Opus 4.7', () => {
-    expect(normalizeDeprecatedModelId('claude-opus-4-6')).toBe('claude-opus-4-8');
-    expect(normalizeDeprecatedModelId('pi/claude-opus-4-6')).toBe('pi/claude-opus-4-8');
-    expect(normalizeDeprecatedModelId('us.anthropic.claude-opus-4-6-v1')).toBe('us.anthropic.claude-opus-4-8');
+  it('normalizes deprecated Opus IDs to Opus 4.8 without migrating Opus 4.7 or 4.6', () => {
+    expect(normalizeDeprecatedModelId('claude-opus-4-5-20251101')).toBe('claude-opus-4-8');
     expect(normalizeDeprecatedModelId('claude-opus-4-7')).toBe('claude-opus-4-7');
+    expect(normalizeDeprecatedModelId('claude-opus-4-6')).toBe('claude-opus-4-6');
+    expect(normalizeDeprecatedModelId('pi/claude-opus-4-6')).toBe('pi/claude-opus-4-6');
+    expect(normalizeDeprecatedModelId('us.anthropic.claude-opus-4-6-v1')).toBe('us.anthropic.claude-opus-4-6-v1');
   });
 });
 
