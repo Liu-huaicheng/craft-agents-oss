@@ -47,10 +47,33 @@ export function normalizeCustomEndpointModelEntry(model: CustomEndpointModelConf
 }
 
 /**
+ * Identity mapping for the thinking levels a custom-endpoint model accepts.
+ * 'max' is deliberately excluded: OpenAI-compatible team gateways commonly gate
+ * 'max' behind per-key permissions (the team Codex gateway rejects it with
+ * `reasoning_effort_not_allowed`). pi's clampThinkingLevel degrades a requested
+ * 'max' to the nearest supported level ('xhigh'), so sessions pinned to 'max'
+ * still run at the highest level the key is allowed to use.
+ */
+const CUSTOM_ENDPOINT_THINKING_LEVEL_MAP: Record<string, string> = {
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+}
+
+/**
  * Build a synthetic model definition for a custom endpoint.
  * Uses reasonable defaults for context window and max tokens since we can't
  * query the endpoint for its actual capabilities. Image support must be
  * explicitly enabled either at the connection level or per-model.
+ *
+ * Reasoning is enabled so craft-side thinking levels pass through as
+ * `reasoning_effort`: without `reasoning: true`, pi-ai clamps every level to
+ * 'off' and requests carry no effort parameter at all (the model then runs at
+ * its own default effort). Only connections that explicitly configure a
+ * customEndpoint protocol reach this path; catalog providers keep their own
+ * per-model reasoning declarations.
  *
  * For `openai-completions` endpoints we set `compat.supportsStore = false` so the
  * pi-ai driver omits the OpenAI-platform-specific `store` param entirely. Third-party
@@ -69,7 +92,8 @@ export function buildCustomEndpointModelDef(
   return {
     id,
     name: id,
-    reasoning: false,
+    reasoning: true,
+    thinkingLevelMap: CUSTOM_ENDPOINT_THINKING_LEVEL_MAP,
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,

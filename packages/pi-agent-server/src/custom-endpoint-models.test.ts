@@ -82,4 +82,19 @@ describe('buildCustomEndpointModelDef', () => {
     const model = buildCustomEndpointModelDef('some-model')
     expect((model as { compat?: unknown }).compat).toBeUndefined()
   })
+
+  // Without reasoning:true pi-ai clamps every thinking level to 'off', so
+  // requests carry no reasoning_effort and the model runs at its default
+  // effort instead of the requested one.
+  it('enables reasoning so thinking levels pass through as reasoning_effort', () => {
+    const model = buildCustomEndpointModelDef('gpt-model', undefined, undefined, 'openai-completions')
+    expect(model.reasoning).toBe(true)
+    expect(model.thinkingLevelMap).toEqual({
+      minimal: 'minimal',
+      low: 'low',
+      medium: 'medium',
+      high: 'high',
+      xhigh: 'xhigh',
+    })
+  })
 })
