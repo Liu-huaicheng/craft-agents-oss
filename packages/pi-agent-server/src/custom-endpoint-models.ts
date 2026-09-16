@@ -79,6 +79,12 @@ const CUSTOM_ENDPOINT_THINKING_LEVEL_MAP: Record<string, string> = {
  * pi-ai driver omits the OpenAI-platform-specific `store` param entirely. Third-party
  * OpenAI-compatible gateways gain nothing from `store`, and strict ones reject unknown
  * params with a 400 — which made those connections unusable. See craft-agents-oss#1022.
+ *
+ * They also get `compat.sendSessionAffinityHeaders = true`: pi-ai only sends
+ * `prompt_cache_key` to api.openai.com, so without these headers (`session_id`,
+ * `x-session-affinity`, carrying the stable pi session id) a load-balancing
+ * gateway cannot pin a conversation to one upstream account, and every turn
+ * re-sends the whole history uncached.
  */
 export function buildCustomEndpointModelDef(
   id: string,
@@ -98,6 +104,8 @@ export function buildCustomEndpointModelDef(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,
     maxTokens: 8_192,
-    ...(api === 'openai-completions' ? { compat: { supportsStore: false } } : {}),
+    ...(api === 'openai-completions'
+      ? { compat: { supportsStore: false, sendSessionAffinityHeaders: true } }
+      : {}),
   }
 }

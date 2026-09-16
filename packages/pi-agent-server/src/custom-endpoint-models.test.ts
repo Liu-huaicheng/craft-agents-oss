@@ -70,7 +70,14 @@ describe('buildCustomEndpointModelDef', () => {
   // `store` param. supportsStore:false makes the pi-ai driver omit it entirely.
   it('disables the store param for openai-completions endpoints', () => {
     const model = buildCustomEndpointModelDef('gpt-model', undefined, undefined, 'openai-completions')
-    expect((model as { compat?: { supportsStore?: boolean } }).compat).toEqual({ supportsStore: false })
+    expect((model as { compat?: { supportsStore?: boolean } }).compat?.supportsStore).toBe(false)
+  })
+
+  // Load-balancing gateways need a stable conversation id to keep a session on
+  // one upstream account; otherwise every turn misses the prompt cache.
+  it('sends session affinity headers for openai-completions endpoints', () => {
+    const model = buildCustomEndpointModelDef('gpt-model', undefined, undefined, 'openai-completions')
+    expect((model as { compat?: { sendSessionAffinityHeaders?: boolean } }).compat?.sendSessionAffinityHeaders).toBe(true)
   })
 
   it('does not set store compat for anthropic-messages endpoints', () => {
