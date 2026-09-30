@@ -27,6 +27,15 @@ const MAX_CONTEXT_FILE_SIZE = 10 * 1024;
 const MAX_CONTEXT_FILES = 30;
 
 /**
+ * Maximum glob depth when searching for context files. The search is synchronous
+ * and runs on the server's event loop, so an unbounded walk of a large working
+ * directory (a folder holding many repo checkouts) stalls every RPC for tens of
+ * seconds. Only the shallowest MAX_CONTEXT_FILES matches are kept, so deeper
+ * files rarely reach the prompt anyway. Depth 5 still finds `a/b/c/d/CLAUDE.md`.
+ */
+const MAX_CONTEXT_FILE_DEPTH = 5;
+
+/**
  * Directories to exclude when searching for context files.
  * These are common build output, dependency, and cache directories.
  */
@@ -130,6 +139,7 @@ export function findAllProjectContextFiles(directory: string): string[] {
       nocase: true,
       ignore: ignorePatterns,
       absolute: false,
+      maxDepth: MAX_CONTEXT_FILE_DEPTH,
     });
 
     if (matches.length === 0) {
