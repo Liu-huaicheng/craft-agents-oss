@@ -104,6 +104,7 @@ import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 import { validateArchiveTarget } from './archive-guards'
+import { resolveToolTargetSessionId, resolveWritableToolTarget } from './session-tool-target'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -4291,10 +4292,12 @@ export class SessionManager implements ISessionManager {
       // Wire up session self-management tools (set_session_labels, set_session_status, etc.)
       mergeSessionScopedToolCallbacks(managed.id, {
         setSessionLabelsFn: async (sessionId: string | undefined, labels: string[]) => {
-          await this.setSessionLabels(sessionId ?? managed.id, labels)
+          const targetId = resolveWritableToolTarget(sessionId, managed.id, (id) => this.sessions.has(id))
+          await this.setSessionLabels(targetId, labels)
         },
         setSessionStatusFn: async (sessionId: string | undefined, status: string) => {
-          await this.setSessionStatus(sessionId ?? managed.id, status as SessionStatus)
+          const targetId = resolveWritableToolTarget(sessionId, managed.id, (id) => this.sessions.has(id))
+          await this.setSessionStatus(targetId, status as SessionStatus)
         },
         // archive_session — archive/unarchive ANOTHER session by ID. Scoped to the
         // invoking session's workspace and blocked mid-turn (guard logic lives in
@@ -4394,7 +4397,7 @@ export class SessionManager implements ISessionManager {
           log: (message: string) => sessionLog.info(message),
         }),
         getSessionInfoFn: (sessionId?: string) => {
-          const targetId = sessionId ?? managed.id
+          const targetId = resolveToolTargetSessionId(sessionId, managed.id)
           const session = this.sessions.get(targetId)
           if (!session) return null
           return {
@@ -4460,7 +4463,7 @@ export class SessionManager implements ISessionManager {
           }
         },
         listBackgroundTasksFn: (sessionId?: string) => {
-          const targetId = sessionId ?? managed.id
+          const targetId = resolveToolTargetSessionId(sessionId, managed.id)
           const now = Date.now()
           return this.listBackgroundTasks(targetId).map((t) => {
             // Prefer wall-clock elapsed; running tasks tick off startTime, terminal
