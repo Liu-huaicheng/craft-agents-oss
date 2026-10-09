@@ -21,9 +21,10 @@ import type { CredentialHealthStatus, CredentialHealthIssue } from '../../../sha
 import { Spinner, FullscreenOverlayBase, Tooltip, TooltipTrigger, TooltipContent } from '@craft-agent/ui'
 import { useSetAtom } from 'jotai'
 import { fullscreenOverlayOpenAtom } from '@/atoms/overlay'
+import { DECISION_SETTINGS_CHANGED_EVENT } from '@/atoms/permission-modes'
 import { motion, AnimatePresence } from 'motion/react'
 import type { LlmConnectionWithStatus, ThinkingLevel, WorkspaceSettings, Workspace } from '../../../shared/types'
-import type { DecisionLayerStatus, DecisionLayerSettingsPatch, DecisionProviderId, DecisionServerProbe, DecisionTestResult } from '../../../shared/types'
+import type { DecisionLayerFeature, DecisionLayerStatus, DecisionLayerSettingsPatch, DecisionProviderId, DecisionServerProbe, DecisionTestResult, DecisionToggleUsage } from '../../../shared/types'
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVELS } from '@craft-agent/shared/agent/thinking-levels'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
 import {
@@ -50,6 +51,7 @@ import {
   SettingsInput,
 } from '@/components/settings'
 import { useOnboarding } from '@/hooks/useOnboarding'
+import { RtkUpdateDialog, type RtkStatusInfo } from '@/components/RtkUpdateDialog'
 import { useWorkspaceIcon } from '@/hooks/useWorkspaceIcon'
 import { OnboardingWizard, type ApiSetupMethod } from '@/components/onboarding'
 import { RenameDialog } from '@/components/ui/rename-dialog'
@@ -57,6 +59,9 @@ import { useAppShellContext } from '@/context/AppShellContext'
 import { getModelShortName, type ModelDefinition } from '@config/models'
 import { getModelsForProviderType, resolveMidStreamBehavior, type CustomEndpointApi, type MidStreamBehavior } from '@config/llm-connections'
 import { toast } from 'sonner'
+
+/** Checks with an outcome after which a feature that changed nothing is pointed out. */
+const DECISION_NO_CHANGE_MIN_CHECKS = 30
 
 /**
  * Compact token count: 1234 → "1.2K", 1234567 → "1.2M". Used by the RTK
@@ -656,13 +661,16 @@ export default function AiSettingsPage() {
   const [extendedPromptCache, setExtendedPromptCache] = useState(false)
   const [enable1MContext, setEnable1MContext] = useState(false)
   const [rtkEnabled, setRtkEnabled] = useState(false)
-  const [rtkStatus, setRtkStatus] = useState<{ installed: boolean; path: string | null; version: string | null } | null>(null)
+  const [rtkStatus, setRtkStatus] = useState<RtkStatusInfo | null>(null)
+  const [rtkUpdateOpen, setRtkUpdateOpen] = useState(false)
   const [rtkRechecking, setRtkRechecking] = useState(false)
   const [rtkGain, setRtkGain] = useState<{ totalCommands: number; totalInput: number; totalOutput: number; totalSaved: number; avgSavingsPct: number; totalTimeMs: number; avgTimeMs: number } | null>(null)
 
   // Decision model (Jev / TypeSafe System One) — opt-in decision layer.
   // The card is always shown; everything behind it stays off until the user enables it.
   const [decisionStatus, setDecisionStatus] = useState<DecisionLayerStatus | null>(null)
+  const [decisionAdvancedOpen, setDecisionAdvancedOpen] = useState(false)
+  const [decisionUsage, setDecisionUsage] = useState<Partial<Record<DecisionLayerFeature, DecisionToggleUsage>>>({})
   const [decisionKeyDraft, setDecisionKeyDraft] = useState('')
   const [decisionModelDraft, setDecisionModelDraft] = useState('')
   const [decisionBaseUrlDraft, setDecisionBaseUrlDraft] = useState('')
@@ -1080,6 +1088,8 @@ export default function AiSettingsPage() {
       const next = await window.electronAPI.setDecisionLayerSettings(patch)
       setDecisionStatus(prev => (prev ? { ...prev, settings: next } : prev))
       setDecisionTestResult(null)
+      // Mode pickers offer Guarded mode only while it is on: let them refresh.
+      window.dispatchEvent(new Event(DECISION_SETTINGS_CHANGED_EVENT))
       // A provider/connection switch drops the model + base URL overrides server-side
       // (they belonged to the previous provider) — mirror that in the inputs.
       if ('provider' in patch || 'connectionSlug' in patch) {
@@ -1096,6 +1106,52 @@ export default function AiSettingsPage() {
     () => decisionStatus?.presets.find(p => p.id === decisionStatus.settings.provider),
     [decisionStatus],
   )
+  // Decision-model features for Advanced settings, grouped by what they touch.
+  // Literal t() keys keep the i18n coverage check effective.
+  // What each feature did over the last 7 days, loaded when Advanced settings opens.
+  useEffect(() => {
+    if (!decisionAdvancedOpen || typeof window.electronAPI?.getDecisionUsage !== 'function') return
+    window.electronAPI.getDecisionUsage().then(setDecisionUsage).catch((error) => console.error('Failed to load decision usage:', error))
+  }, [decisionAdvancedOpen])
+  const decisionUsageNote = (usage: DecisionToggleUsage | undefined): string | undefined => {
+    if (!usage) return undefined
+    if (usage.withOutcome === 0) return t("settings.ai.decisions.usageChecks", { calls: usage.calls, failures: usage.failures })
+    const line = t("settings.ai.decisions.usageChanged", { calls: usage.calls, changed: usage.changed, failures: usage.failures })
+    // Every extra call should earn its place: say so when a feature has had its chances and changed nothing.
+    return usage.withOutcome >= DECISION_NO_CHANGE_MIN_CHECKS && usage.changed === 0 ? `${line} · ${t("settings.ai.decisions.usageNoChange")}` : line
+  }
+
+  const decisionFeatureGroups: Array<{ id: string; title: string; toggles: Array<{ feature: DecisionLayerFeature; label: string; description: string; tooltip: string }> }> = [
+    { id: 'agent', title: t("settings.ai.decisions.groupAgent"), toggles: [
+      { feature: 'decideTool', label: t("settings.ai.decisions.featureDecideTool"), description: t("settings.ai.decisions.featureDecideToolDesc"), tooltip: t("settings.ai.decisions.featureDecideToolTooltip") },
+      { feature: 'suggestions', label: t("settings.ai.decisions.featureSuggestions"), description: t("settings.ai.decisions.featureSuggestionsDesc"), tooltip: t("settings.ai.decisions.featureSuggestionsTooltip") },
+      { feature: 'adaptiveThinking', label: t("settings.ai.decisions.featureAdaptiveThinking"), description: t("settings.ai.decisions.featureAdaptiveThinkingDesc"), tooltip: t("settings.ai.decisions.featureAdaptiveThinkingTooltip") },
+      { feature: 'largeResults', label: t("settings.ai.decisions.featureLargeResults"), description: t("settings.ai.decisions.featureLargeResultsDesc"), tooltip: t("settings.ai.decisions.featureLargeResultsTooltip") },
+    ] },
+    { id: 'conversation', title: t("settings.ai.decisions.groupConversation"), toggles: [
+      { feature: 'midTurnMessages', label: t("settings.ai.decisions.featureMidTurnMessages"), description: t("settings.ai.decisions.featureMidTurnMessagesDesc"), tooltip: t("settings.ai.decisions.featureMidTurnMessagesTooltip") },
+      { feature: 'turnOutcome', label: t("settings.ai.decisions.featureTurnOutcome"), description: t("settings.ai.decisions.featureTurnOutcomeDesc"), tooltip: t("settings.ai.decisions.featureTurnOutcomeTooltip") },
+      { feature: 'smartTitles', label: t("settings.ai.decisions.featureSmartTitles"), description: t("settings.ai.decisions.featureSmartTitlesDesc"), tooltip: t("settings.ai.decisions.featureSmartTitlesTooltip") },
+    ] },
+    { id: 'permissions', title: t("settings.ai.decisions.groupPermissions"), toggles: [
+      { feature: 'guardedMode', label: t("settings.ai.decisions.featureGuardedMode"), description: t("settings.ai.decisions.featureGuardedModeDesc"), tooltip: t("settings.ai.decisions.featureGuardedModeTooltip") },
+      { feature: 'riskBadges', label: t("settings.ai.decisions.featureRiskBadges"), description: t("settings.ai.decisions.featureRiskBadgesDesc"), tooltip: t("settings.ai.decisions.featureRiskBadgesTooltip") },
+    ] },
+    { id: 'automations', title: t("settings.ai.decisions.groupAutomations"), toggles: [
+      { feature: 'semanticLabels', label: t("settings.ai.decisions.featureSemanticLabels"), description: t("settings.ai.decisions.featureSemanticLabelsDesc"), tooltip: t("settings.ai.decisions.featureSemanticLabelsTooltip") },
+      { feature: 'automationConditions', label: t("settings.ai.decisions.featureAutomationConditions"), description: t("settings.ai.decisions.featureAutomationConditionsDesc"), tooltip: t("settings.ai.decisions.featureAutomationConditionsTooltip") },
+      { feature: 'taskVerdicts', label: t("settings.ai.decisions.featureTaskVerdicts"), description: t("settings.ai.decisions.featureTaskVerdictsDesc"), tooltip: t("settings.ai.decisions.featureTaskVerdictsTooltip") },
+      { feature: 'taskRepairs', label: t("settings.ai.decisions.featureTaskRepairs"), description: t("settings.ai.decisions.featureTaskRepairsDesc"), tooltip: t("settings.ai.decisions.featureTaskRepairsTooltip") },
+    ] },
+  ]
+  // A remote server on an older version reports fewer features: show and count only what it knows.
+  const decisionReportedGroups = decisionStatus
+    ? decisionFeatureGroups
+      .map(group => ({ ...group, toggles: group.toggles.filter(({ feature }) => feature in decisionStatus.settings.features) }))
+      .filter(group => group.toggles.length > 0)
+    : []
+  const decisionReportedToggles = decisionReportedGroups.flatMap(group => group.toggles)
+  const decisionFeaturesOn = decisionReportedToggles.filter(({ feature }) => decisionStatus?.settings.features[feature]).length
   const decisionKeySourceValue = decisionStatus?.settings.connectionSlug
     ? `connection:${decisionStatus.settings.connectionSlug}`
     : `provider:${decisionStatus?.settings.provider ?? 'typesafe'}`
@@ -1358,6 +1414,23 @@ export default function AiSettingsPage() {
                         checked={rtkEnabled}
                         onCheckedChange={handleRtkToggle}
                       />
+                      {rtkStatus.outdated && (
+                        <SettingsRow
+                          label={t("settings.ai.rtk.outdated", { version: rtkStatus.version ?? '?' })}
+                          description={t("settings.ai.rtk.outdatedDesc", { min: rtkStatus.minSafeVersion })}
+                        >
+                          <Button
+                            size="sm"
+                            onClick={() => setRtkUpdateOpen(true)}
+                            className="bg-background shadow-minimal text-foreground hover:bg-foreground/5 rounded-lg"
+                          >
+                            {t("settings.ai.rtk.update")}
+                          </Button>
+                        </SettingsRow>
+                      )}
+                      {rtkStatus.outdated && (
+                        <RtkUpdateDialog open={rtkUpdateOpen} onOpenChange={setRtkUpdateOpen} status={rtkStatus} onStatusChange={setRtkStatus} />
+                      )}
                       {rtkEnabled && rtkGain && rtkGain.totalCommands > 0 && (
                         <div className="px-4 pb-4 -mt-1">
                           <div className="flex items-center justify-between text-xs text-foreground/60">
@@ -1534,6 +1607,70 @@ export default function AiSettingsPage() {
                     <p className="px-4 pb-4 -mt-1 text-xs text-foreground/60">
                       {t("settings.ai.decisions.privacyNote")}
                     </p>
+                  </SettingsCard>
+
+                  {/* Advanced settings: what the decision model is used for, collapsed by default.
+                      Same structure as the Workspace Overrides cards: the toggles expand inside the card. */}
+                  <SettingsCard>
+                    <button
+                      type="button"
+                      aria-expanded={decisionAdvancedOpen}
+                      onClick={() => setDecisionAdvancedOpen(open => !open)}
+                      className="w-full flex items-center justify-between py-3 px-4 hover:bg-foreground/[0.02] transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-6 h-6 rounded-full bg-foreground/5 ring-1 ring-border/50 flex items-center justify-center">
+                          <Settings2 className="h-3.5 w-3.5 text-muted-foreground" />
+                        </div>
+                        <div className="text-left">
+                          <div className="text-sm font-medium">{t("settings.ai.decisions.advanced")}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {decisionStatus.settings.enabled
+                              ? t("settings.ai.decisions.advancedSummary", { on: decisionFeaturesOn, total: decisionReportedToggles.length })
+                              : t("settings.ai.decisions.advancedSummaryOff")}
+                          </div>
+                        </div>
+                      </div>
+                      {decisionAdvancedOpen ? (
+                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      )}
+                    </button>
+
+                    <AnimatePresence initial={false}>
+                      {decisionAdvancedOpen && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                          className="overflow-hidden"
+                        >
+                          <div className="border-t border-border/50 px-4 py-2">
+                            {decisionReportedGroups.map((group, index) => (
+                              <div key={group.id} className={cn(index > 0 && 'mt-1 border-t border-border/30')}>
+                                <div className="px-4 pt-3 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                  {group.title}
+                                </div>
+                                {group.toggles.map(({ feature, label, description, tooltip }) => (
+                                  <SettingsToggle
+                                    key={feature}
+                                    label={label}
+                                    description={description}
+                                    tooltip={tooltip}
+                                    note={decisionUsageNote(decisionUsage[feature])}
+                                    checked={decisionStatus.settings.features[feature] ?? false}
+                                    disabled={!decisionStatus.settings.enabled}
+                                    onCheckedChange={(checked) => { void updateDecisionSettings({ features: { [feature]: checked } }) }}
+                                  />
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </SettingsCard>
                 </SettingsSection>
               )}
