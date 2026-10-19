@@ -80,5 +80,83 @@ describe('ClaudeAgent keep-alive Stop', () => {
     expect(agent.persistentInput).toBe(newInput)
     expect(agent.persistentConsumerIterator).toBe(newIterator)
   })
-})
 
+  // Found 2026-10-11: a Stop hard-aborted the query and killed the step's three background
+  // research agents, whose work then had to be redone. stopTurn interrupts the turn only.
+  describe('stopTurn', () => {
+    function withInterrupt(agent: any, interrupt: () => Promise<void>) {
+      agent.debug = () => {}
+      agent.config = {}
+      agent.fakeQuery.interrupt = interrupt
+      agent.currentQuery = agent.fakeQuery
+      agent.persistentAbortController = new AbortController()
+      return agent
+    }
+
+    it('ends the turn at once and interrupts it without closing the query', async () => {
+      let interrupts = 0
+      const agent = withInterrupt(await agentInPersistentTurn(), async () => { interrupts++ })
+      const turn = agent.activeTurnState
+      const channel = agent.activeTurnChannel
+
+      expect(agent.stopTurn()).toBe(true)
+
+      expect(turn.aborted).toBe(true)
+      expect(channel.isEnded).toBe(true)
+      expect(agent.activeTurnChannel).toBeNull()
+      expect(interrupts).toBe(1)
+      // The query (and its background agents) lives on
+      expect(agent.currentQuery).toBe(agent.fakeQuery)
+      expect(agent.persistentInput).not.toBeNull()
+      expect(agent.persistentAbortController.signal.aborted).toBe(false)
+      clearTimeout(agent.stoppedTurn.fallback)
+    })
+
+    it('keeps the stopped turn\'s leftovers, up to its result, away from the next turn', async () => {
+      const agent = withInterrupt(await agentInPersistentTurn(), async () => {})
+      const messages: any[] = []
+      let deliver!: (value: any) => void
+      agent.persistentIterator = { next: () => new Promise(resolve => { deliver = (value) => resolve({ done: false, value }) }) }
+      agent.startPersistentConsumer()
+      agent.stopTurn()
+
+      const next = await agent.beginPersistentTurn({ type: 'user', message: { role: 'user', content: 'use the password' }, parent_tool_use_id: null }, {}, { thinking: { type: 'adaptive' }, effort: 'high' })
+      const reading = (async () => { for await (const message of next) messages.push(message) })()
+      const send = async (value: any) => { deliver(value); await new Promise(resolve => setTimeout(resolve, 0)) }
+
+      await send({ type: 'assistant', id: 'old-tail' })
+      await send({ type: 'result', subtype: 'error_during_execution', id: 'old-result' })
+      expect(agent.stoppedTurn).toBeNull()
+      await send({ type: 'assistant', id: 'new' })
+      await send({ type: 'result', subtype: 'success', id: 'new-result' })
+      await reading
+
+      expect(messages.map(m => m.id)).toEqual(['new', 'new-result'])
+    })
+
+    it('hard-stops the query when the turn never ends or the interrupt fails', async () => {
+      const silent = withInterrupt(await agentInPersistentTurn(), async () => {})
+      silent.stoppedTurnResultWaitMs = 10
+      const controller = silent.persistentAbortController
+      silent.stopTurn()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(controller.signal.aborted).toBe(true)
+      expect(silent.currentQuery).toBeNull()
+
+      const failing = withInterrupt(await agentInPersistentTurn(), async () => { throw new Error('query closed') })
+      const failingController = failing.persistentAbortController
+      failing.stopTurn()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(failingController.signal.aborted).toBe(true)
+    })
+
+    it('declines without a live keep-alive turn, so the caller hard-stops', async () => {
+      const agent = withInterrupt(await agentInPersistentTurn(), async () => {})
+      agent.activeTurnChannel.end()
+      agent.activeTurnChannel = null
+      expect(agent.stopTurn()).toBe(false)
+      agent.currentQuery = null
+      expect(agent.stopTurn()).toBe(false)
+    })
+  })
+})

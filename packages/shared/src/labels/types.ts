@@ -20,7 +20,8 @@ import type { EntityColor } from '../colors/types.ts'
 
 /**
  * Regex auto-label rule: scans user messages and automatically applies the
- * label with extracted values.
+ * label — with the extracted value on a valued label (`valueType` set), as the
+ * bare id on a plain one.
  *
  * Uses capture groups ($1, $2, etc.) in the pattern and substitutes them
  * into the valueTemplate. Rules are evaluated in order. Multiple rules on
@@ -93,17 +94,17 @@ export interface LabelConfig {
   children?: LabelConfig[];
 
   /**
-   * Optional value type hint for UI rendering and agent affordances.
-   * When set, indicates this label carries a typed value (e.g., "priority::3").
-   * Parser always infers the type from raw value, but this hint tells UI
-   * what input widget to show and tells the agent what format to write.
-   * Omit for boolean (presence-only) labels.
+   * Whether (and how) this label carries a value. Set: entries are `id::value`
+   * (e.g. "priority::3"), the UI shows the matching input widget and agents
+   * write that format (the parser still infers the type from the raw value).
+   * Omitted: a presence-only label — never stored with a value (see
+   * canonicalizeSessionLabels).
    */
   valueType?: 'string' | 'number' | 'date' | 'link';
 
   /**
-   * Auto-label rules: regex patterns that scan user messages and automatically
-   * apply this label with extracted values.
+   * Auto-label rules: regex patterns or semantic questions that scan user messages
+   * and automatically apply this label (with extracted values when it is valued).
    * Multiple rules = multiple ways to trigger (evaluated in order, all matches collected).
    */
   autoRules?: AutoLabelRule[];

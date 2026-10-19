@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'bun:test'
 import { validateLabelsContent } from '../../config/validators.ts'
+import { hasCaptureGroup } from './validation.ts'
 
-function labelsJson(autoRules: unknown[]): string {
-  return JSON.stringify({ version: 1, labels: [{ id: 'billing', name: 'Billing', autoRules }] })
+function labelsJson(autoRules: unknown[], valueType?: string): string {
+  return JSON.stringify({ version: 1, labels: [{ id: 'billing', name: 'Billing', ...(valueType ? { valueType } : {}), autoRules }] })
 }
 
 describe('labels/config.json accepts semantic auto-rules', () => {
@@ -33,5 +34,33 @@ describe('labels/config.json accepts semantic auto-rules', () => {
 
     expect(validateLabelsContent(labelsJson([{ semantic: '' }])).valid).toBe(false)
     expect(validateLabelsContent(labelsJson([{ semantic: 'Is it x?', valueTemplate: '$1' }])).valid).toBe(false)
+  })
+})
+
+describe('labels/config.json: rules on plain labels store no value', () => {
+  const warningsOf = (content: string) => validateLabelsContent(content).warnings.map(w => w.message)
+
+  it('a presence pattern on a plain label is fine; a valueTemplate or semantic value there is flagged as ignored', () => {
+    expect(warningsOf(labelsJson([{ pattern: 'invoice|bill' }]))).toEqual([])
+    const template = validateLabelsContent(labelsJson([{ pattern: '(invoice)', valueTemplate: '$1' }]))
+    expect(template.valid).toBe(true)
+    expect(template.warnings.map(w => w.message)).toEqual([expect.stringContaining('valueTemplate is ignored')])
+    expect(warningsOf(labelsJson([{ semantic: 'Is the user asking about billing?', value: 'yes' }])))
+      .toEqual([expect.stringContaining('value is ignored')])
+  })
+
+  it('a valued label still hears about a pattern without capture groups, and accepts a semantic value', () => {
+    expect(warningsOf(labelsJson([{ pattern: 'invoice' }], 'string'))).toEqual([expect.stringContaining('no capture groups')])
+    expect(warningsOf(labelsJson([{ pattern: '(INV-\\d+)', valueTemplate: '$1' }], 'string'))).toEqual([])
+    expect(warningsOf(labelsJson([{ semantic: 'Is the user asking about billing?', value: 'billing' }], 'string'))).toEqual([])
+  })
+
+  it('counts named groups as capture groups and accepts a constant template', () => {
+    expect(warningsOf(labelsJson([{ pattern: '(?<key>INV-\\d+)' }], 'string'))).toEqual([])
+    expect(warningsOf(labelsJson([{ pattern: 'git', valueTemplate: 'git' }], 'string'))).toEqual([])
+    expect(hasCaptureGroup('(\\d+)')).toBe(true)
+    expect(hasCaptureGroup('(?:a|b)')).toBe(false)
+    expect(hasCaptureGroup('(?<=a)b(?!c)')).toBe(false)
+    expect(hasCaptureGroup('\\(x\\) [(]')).toBe(false)
   })
 })

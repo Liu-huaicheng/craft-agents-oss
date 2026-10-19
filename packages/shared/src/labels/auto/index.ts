@@ -6,6 +6,7 @@ export {
   collectAutoLabelRules,
   collectSemanticAutoLabelRules,
   autoLabelMatchToEntry,
+  newAutoLabelEntries,
   semanticRuleEntry,
   SEMANTIC_RULE_MAX_MESSAGE_CHARS,
   SEMANTIC_RULE_MIN_MESSAGE_CHARS,

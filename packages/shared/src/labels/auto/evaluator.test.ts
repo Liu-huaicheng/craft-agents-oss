@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
-import type { LabelConfig } from '../types.ts'
+import type { LabelConfig, SemanticAutoLabelRule } from '../types.ts'
 import type { DecisionRequest, DecisionResult } from '../../decisions/types.ts'
+import type { AutoLabelMatch } from './types.ts'
 import {
   autoLabelMatchToEntry,
   buildSemanticAutoLabelRequest,
@@ -8,6 +9,7 @@ import {
   collectSemanticAutoLabelRules,
   evaluateAutoLabels,
   evaluateSemanticAutoLabels,
+  newAutoLabelEntries,
   semanticRuleEntry,
 } from './evaluator.ts'
 import { validateSemanticAutoLabelRule } from './validation.ts'
@@ -32,6 +34,7 @@ const LABELS: LabelConfig[] = [
       {
         id: 'mobile',
         name: 'Mobile',
+        valueType: 'string',
         autoRules: [{ semantic: 'Is this about the iOS or Android app?', threshold: 0.6, value: 'mobile-app' }],
       },
     ],
@@ -60,11 +63,10 @@ describe('auto-label rules: regex path stays synchronous and ignores semantic ru
     expect(matches).toEqual([{ labelId: 'linear-issue', value: 'CRA-123', matchedText: 'CRA-123', via: 'regex' }])
   })
 
-  it('formats entries: regex keeps the historical id::value form, semantic plain matches use the bare id', () => {
+  it('formats entries: id::value for a valued match, the bare id otherwise', () => {
     expect(autoLabelMatchToEntry({ labelId: 'linear-issue', value: 'CRA-1', matchedText: 'CRA-1', via: 'regex' })).toBe('linear-issue::CRA-1')
-    // empty regex capture → unchanged legacy form, so existing sessions do not get duplicate chips
-    expect(autoLabelMatchToEntry({ labelId: 'budget', value: '', matchedText: 'budget:', via: 'regex' })).toBe('budget::')
-    expect(autoLabelMatchToEntry({ labelId: 'budget', value: '', matchedText: 'budget:' })).toBe('budget::')
+    // An empty capture applies the plain label (older sessions may carry `budget::`; LabelEntrySet treats both as one)
+    expect(autoLabelMatchToEntry({ labelId: 'budget', value: '', matchedText: '$', via: 'regex' })).toBe('budget')
     expect(autoLabelMatchToEntry({ labelId: 'billing', value: '', matchedText: 'q', via: 'semantic' })).toBe('billing')
     expect(autoLabelMatchToEntry({ labelId: 'area', value: 'mobile-app', matchedText: 'q', via: 'semantic' })).toBe('area::mobile-app')
   })
@@ -73,6 +75,96 @@ describe('auto-label rules: regex path stays synchronous and ignores semantic ru
     const hybrid: LabelConfig[] = [{ id: 'h', name: 'H', autoRules: [{ pattern: 'foo', semantic: 'Is it foo?' } as never] }]
     expect(collectSemanticAutoLabelRules(hybrid)).toHaveLength(0)
     expect(evaluateAutoLabels('foo bar', hybrid)).toHaveLength(1)
+  })
+})
+
+describe('plain labels (no valueType) are presence-only', () => {
+  const TREE: LabelConfig[] = [
+    { id: 'bug', name: 'Bug', autoRules: [{ pattern: 'bug', flags: 'gi' }] },
+    { id: 'code', name: 'Code', autoRules: [{ pattern: '(git)', valueTemplate: '$1' }, { pattern: 'feature implementation' }] },
+    { id: 'linear-issue', name: 'Linear Issue', valueType: 'string', autoRules: [{ pattern: '\\b([A-Z]{2,5}-\\d+)\\b', valueTemplate: '$1' }] },
+  ]
+
+  it('applies the bare id once per message, whatever the match spelled or captured', () => {
+    const matches = evaluateAutoLabels('Bug: the bug in git is a BUG; Git feature implementation', TREE)
+    expect(matches.map(autoLabelMatchToEntry)).toEqual(['bug', 'code'])
+    expect(matches[0]).toEqual({ labelId: 'bug', value: '', matchedText: 'Bug', via: 'regex' })
+  })
+
+  it('dedupes values case-insensitively within a message, keeping the first spelling', () => {
+    expect(evaluateAutoLabels('CRA-1, cra-1 and CRA-2', TREE).map(autoLabelMatchToEntry)).toEqual(['linear-issue::CRA-1', 'linear-issue::CRA-2'])
+  })
+
+  it('semantic rules ignore a value on a plain label', async () => {
+    const tree: LabelConfig[] = [{ id: 'trip', name: 'Trip', autoRules: [{ semantic: 'Is the user planning a trip?', value: 'yes' }] }]
+    expect(semanticRuleEntry(tree[0]!, tree[0]!.autoRules![0] as SemanticAutoLabelRule)).toBe('trip')
+    const matches = await evaluateSemanticAutoLabels('We are planning a weekend trip to Vienna', tree, async (request) => resultFor(request, [0.99]))
+    expect(matches.map(autoLabelMatchToEntry)).toEqual(['trip'])
+  })
+
+  it('a legacy `trip::` entry counts as the label: the rule is not asked again', async () => {
+    let calls = 0
+    const tree: LabelConfig[] = [{ id: 'trip', name: 'Trip', autoRules: [{ semantic: 'Is the user planning a trip?' }] }]
+    const decide = async (request: DecisionRequest) => { calls += 1; return resultFor(request, [1]) }
+    expect(await evaluateSemanticAutoLabels('We are planning a weekend trip to Vienna', tree, decide, { skipEntries: ['trip::'] })).toEqual([])
+    expect(calls).toBe(0)
+  })
+})
+
+describe('newAutoLabelEntries', () => {
+  const match = (labelId: string, value = ''): AutoLabelMatch => ({ labelId, value, matchedText: labelId, via: 'regex' })
+  const TREE: LabelConfig[] = [
+    { id: 'bug', name: 'Bug' },
+    { id: 'code', name: 'Code' },
+    { id: 'trip', name: 'Trip' },
+    { id: 'linear-issue', name: 'Linear Issue', valueType: 'string' },
+    { id: 'doc', name: 'Doc', valueType: 'link' },
+    { id: 'budget', name: 'Budget', valueType: 'number' },
+  ]
+
+  it('adds nothing a session already has by meaning, including values older versions stored on plain labels', () => {
+    const legacy = ['bug::bug', 'bug::Bug', 'code::git', 'trip::', 'linear-issue::cra-1']
+    expect(newAutoLabelEntries(legacy, [match('bug'), match('code'), match('trip'), match('linear-issue', 'CRA-1')], TREE)).toEqual([])
+  })
+
+  it('adds new labels and values once each, valued matches first', () => {
+    expect(newAutoLabelEntries(['bug'], [
+      match('code'), match('linear-issue', 'CRA-2'), match('code'), match('linear-issue', 'cra-2'), match('bug'),
+    ], TREE)).toEqual(['linear-issue::CRA-2', 'code'])
+  })
+
+  it('folds case for string values only: links stay exact', () => {
+    expect(newAutoLabelEntries(['doc::https://youtu.be/dQw4w9WgXcQ'], [match('doc', 'https://youtu.be/dqw4w9wgxcq')], TREE))
+      .toEqual(['doc::https://youtu.be/dqw4w9wgxcq'])
+  })
+
+  it('applies a label matched with and without a value once, with its value, in either order', () => {
+    expect(newAutoLabelEntries([], [match('budget'), match('budget', '5000')], TREE)).toEqual(['budget::5000'])
+    expect(newAutoLabelEntries([], [match('budget', '5000'), match('budget')], TREE)).toEqual(['budget::5000'])
+  })
+})
+
+describe('evaluateAutoLabels: valued labels', () => {
+  const TREE: LabelConfig[] = [
+    { id: 'budget', name: 'Budget', valueType: 'number', autoRules: [{ pattern: 'budget(?:\\s*\\$(\\d+k?))?' }, { pattern: '\\$(\\d+k)' }] },
+    { id: 'due', name: 'Due', valueType: 'date', autoRules: [{ pattern: 'due(?: (\\S+))?' }] },
+    { id: 'linear-issue', name: 'Linear Issue', valueType: 'string', autoRules: [{ pattern: '\\b([A-Z]{2,5}-\\d+)\\b', valueTemplate: '$1' }] },
+  ]
+
+  it('applies the bare label when an optional group took no part or the value is invalid for the type', () => {
+    expect(evaluateAutoLabels('what is the budget?', TREE).map(autoLabelMatchToEntry)).toEqual(['budget'])
+    expect(evaluateAutoLabels('when is it due tomorrow', TREE).map(autoLabelMatchToEntry)).toEqual(['due'])
+    expect(evaluateAutoLabels('it is due 2026-11-02', TREE).map(autoLabelMatchToEntry)).toEqual(['due::2026-11-02'])
+  })
+
+  it('keeps only the value when a label matched both ways, whichever rule came first', () => {
+    expect(evaluateAutoLabels('the budget is high: $5k', TREE).map(autoLabelMatchToEntry)).toEqual(['budget::5000'])
+  })
+
+  it('skips what the session already has before counting toward the cap', () => {
+    const keys = Array.from({ length: 12 }, (_, i) => `CRA-${i + 1}`)
+    const existing = keys.slice(0, 10).map(key => `linear-issue::${key}`)
+    expect(evaluateAutoLabels(keys.join(' '), TREE, existing).map(m => m.value)).toEqual(['CRA-11', 'CRA-12'])
   })
 })
 

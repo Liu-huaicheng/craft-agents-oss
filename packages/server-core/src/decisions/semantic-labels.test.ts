@@ -52,15 +52,17 @@ describe('semantic labels hook', () => {
     expect(matches).toEqual([])
   })
 
-  it('asks nothing for rules whose label the session already has', async () => {
-    let resolved = false
-    const matches = await evaluateSemanticLabelsForMessage('why was my invoice charged twice again', LABELS, {
-      sessionId: 's',
-      existingEntries: ['billing'],
-      resolveClient: async () => { resolved = true; return { ok: false, failure: { kind: 'disabled', message: 'x' } } },
-    })
-    expect(matches).toEqual([])
-    expect(resolved).toBe(false)
+  it('asks nothing for rules whose label the session already has — in any spelling older versions stored', async () => {
+    for (const existing of ['billing', 'billing::', 'billing::Invoice']) {
+      let resolved = false
+      const matches = await evaluateSemanticLabelsForMessage('why was my invoice charged twice again', LABELS, {
+        sessionId: 's',
+        existingEntries: [existing],
+        resolveClient: async () => { resolved = true; return { ok: false, failure: { kind: 'disabled', message: 'x' } } },
+      })
+      expect(matches).toEqual([])
+      expect(resolved).toBe(false)
+    }
   })
 
   it('records "changed" only for labels the session did not have', async () => {

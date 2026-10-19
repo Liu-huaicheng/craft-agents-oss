@@ -54,7 +54,7 @@ function ctx(toolName: string, input: Record<string, unknown>): PreToolUseInput 
     allSourceSlugs: ['github'],
     hasSourceActivation: false,
     permissionManager: { isCommandWhitelisted: () => false, getBaseCommand: (c: string) => c, isDomainWhitelisted: () => false } as never,
-    prerequisiteManager: { checkPrerequisites: () => ({ allowed: true }), trackBashSkillRead: () => false } as never,
+    prerequisiteManager: { checkPrerequisites: () => ({ allowed: true }), checkBashPrerequisites: () => ({ allowed: true }) } as never,
   } as PreToolUseInput;
 }
 

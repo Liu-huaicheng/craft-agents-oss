@@ -57,6 +57,8 @@ export interface AppShellContextType {
   enabledSources?: LoadedSource[]
   /** All skills for this workspace - provided by AppShell component (for @mentions) */
   skills?: LoadedSkill[]
+  /** User-defined chat starter prompts from workspace config */
+  chatStarters?: Array<{ label: string; prompt: string }>
   /** Working directory of the active session — needed for project-level skill resolution */
   activeSessionWorkingDirectory?: string
   /** All label configs (tree) for label menu and badge display */
@@ -147,6 +149,9 @@ export interface AppShellContextType {
   /** Whether this panel is the focused panel (for multi-panel visual differentiation) */
   isFocusedPanel?: boolean
 
+  /** The panel-stack entry this subtree renders in (set by PanelSlot; the same session can be open in two panels) */
+  panelId?: string
+
   /** Whether the shell is currently in compact/narrow mode */
   isCompactMode?: boolean
 
@@ -178,6 +183,9 @@ export interface AppShellContextType {
   /** Replay (re-execute) webhook actions for a failed automation */
   onReplayAutomation?: (automationId: string, event: string) => void
 }
+
+/** Window event (detail: `{ workspaceId }`) asking AppShell to reload that workspace's settings. */
+export const WORKSPACE_SETTINGS_CHANGED_EVENT = 'craft:workspace-settings-changed'
 
 const AppShellContext = createContext<AppShellContextType | null>(null)
 

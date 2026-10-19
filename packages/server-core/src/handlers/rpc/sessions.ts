@@ -112,7 +112,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.SEND_MESSAGE,
   RPC_CHANNELS.sessions.CANCEL,
   RPC_CHANNELS.sessions.KILL_SHELL,
-  RPC_CHANNELS.tasks.GET_OUTPUT,
+  RPC_CHANNELS.sessions.GET_BACKGROUND_TASK_OUTPUT,
+  RPC_CHANNELS.sessions.STOP_BACKGROUND_TASK,
   RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION,
   RPC_CHANNELS.sessions.RESPOND_TO_CREDENTIAL,
   RPC_CHANNELS.sessions.COMMAND,
@@ -264,20 +265,16 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     return sessionManager.cancelProcessing(sessionId, silent)
   })
 
-  // Kill background shell
-  server.handle(RPC_CHANNELS.sessions.KILL_SHELL, async (_ctx, sessionId: string, shellId: string) => {
-    return sessionManager.killShell(sessionId, shellId)
+  // Background tasks: what one has written so far (the task chip's card), and stopping one.
+  // `sessions:killShell` is the older name of the stop channel (shells only).
+  server.handle(RPC_CHANNELS.sessions.GET_BACKGROUND_TASK_OUTPUT, async (_ctx, sessionId: string, taskId: string, kind?: 'agent' | 'shell' | 'workflow') => {
+    return sessionManager.getBackgroundTaskOutput(sessionId, taskId, kind)
   })
-
-  // Get background task output
-  server.handle(RPC_CHANNELS.tasks.GET_OUTPUT, async (_ctx, taskId: string) => {
-    try {
-      const output = await sessionManager.getTaskOutput(taskId)
-      return output
-    } catch (err) {
-      log.error('Failed to get task output:', err)
-      throw err
-    }
+  server.handle(RPC_CHANNELS.sessions.STOP_BACKGROUND_TASK, async (_ctx, sessionId: string, taskId: string) => {
+    return sessionManager.stopBackgroundTask(sessionId, taskId)
+  })
+  server.handle(RPC_CHANNELS.sessions.KILL_SHELL, async (_ctx, sessionId: string, shellId: string) => {
+    return sessionManager.stopBackgroundTask(sessionId, shellId)
   })
 
   // Respond to a permission request (bash command approval)

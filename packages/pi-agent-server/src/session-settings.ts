@@ -13,6 +13,12 @@
  * The in-memory manager starts from the SDK defaults and pins the retry policy
  * explicitly. The main process surfaces the resulting `auto_retry_*` events —
  * see `packages/shared/src/agent/backend/pi/event-adapter.ts`.
+ *
+ * The working directory is never a trusted Pi project: trust would auto-load
+ * `<cwd>/.pi/extensions` (code that runs in this process and can hook every
+ * provider request), `.pi`/`.agents` skills, prompts and `SYSTEM.md` from
+ * whatever repository the user opened. Craft owns the system prompt, skills
+ * and tools for its sessions, so none of that is wanted.
  */
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import { LLM_QUERY_TIMEOUT_MS } from '../../shared/src/agent/llm-tool.ts';
@@ -43,6 +49,10 @@ export const CRAFT_PI_RETRY_SETTINGS = {
   enabled: true,
   maxRetries: 4,
   baseDelayMs: 2_000,
+  // Cap for one agent-level backoff sleep (`retryDelayMs` in pi-ai, SDK default
+  // 60 s). Four retries at a 2 s base never reach it; pinned so the policy is
+  // fully explicit.
+  maxAgentDelayMs: 60_000,
   provider: {
     maxRetries: 2,
     maxRetryDelayMs: 60_000,
@@ -62,6 +72,7 @@ export const CRAFT_PI_EPHEMERAL_RETRY_SETTINGS = {
   enabled: true,
   maxRetries: 2,
   baseDelayMs: 2_000,
+  maxAgentDelayMs: 60_000,
   provider: {
     maxRetries: 2,
     maxRetryDelayMs: 10_000,
@@ -88,13 +99,43 @@ export function buildCraftPiSettings(purpose: CraftPiSessionPurpose = 'main'): P
       enabled: retry.enabled,
       maxRetries: retry.maxRetries,
       baseDelayMs: retry.baseDelayMs,
+      maxAgentDelayMs: retry.maxAgentDelayMs,
       provider: { ...retry.provider },
     },
     // PiAgent re-asserts auto-compaction on every subprocess start
     // (requestSetAutoCompaction(true)); keep the SDK default explicit here so
     // the intent is visible next to the retry policy.
     compaction: { enabled: true },
+    // Pi >=1.0 keeps the prompt cache warm while a run is in progress (a long
+    // tool call, a pending permission prompt) by replaying the last request
+    // with a 1-token output cap shortly before the cache expires, only when
+    // the expected saving is at least $0.05. Keep that SDK default for chats;
+    // utility sessions are one-shot and disposed right after their prompt.
+    cacheWarming: purpose === 'ephemeral' ? 'off' : 'streaming',
   };
+}
+
+const isPositiveInt = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) > 0;
+
+/**
+ * Pi compacts once context exceeds `contextWindow − reserveTokens` and has no
+ * threshold setting of its own, so Craft's "Compact context at" (config.json
+ * `autoCompactWindow`) becomes a per-model reserve. Never below Pi's own
+ * reserve: a window at or beyond the model's limit keeps Pi's default trigger.
+ */
+export function compactionReserveFor(
+  contextWindow: unknown,
+  baseReserve: number,
+  autoCompactWindow: number | undefined,
+): number {
+  if (!isPositiveInt(contextWindow) || !isPositiveInt(autoCompactWindow)) return baseReserve;
+  return Math.max(baseReserve, contextWindow - autoCompactWindow);
+}
+
+export interface CraftSettingsManagerOptions {
+  /** Compact once context reaches this many tokens (config.json `autoCompactWindow`). */
+  autoCompactWindow?: number;
 }
 
 /**
@@ -104,6 +145,23 @@ export function buildCraftPiSettings(purpose: CraftPiSessionPurpose = 'main'): P
  */
 export function createCraftSettingsManager(
   purpose: CraftPiSessionPurpose = 'main',
+  { autoCompactWindow }: CraftSettingsManagerOptions = {},
 ): SettingsManager {
-  return SettingsManager.inMemory(buildCraftPiSettings(purpose));
+  const manager = SettingsManager.inMemory(buildCraftPiSettings(purpose), { projectTrusted: false });
+  if (!isPositiveInt(autoCompactWindow)) return manager;
+
+  // The reserve depends on the active model's window, which can change mid-session.
+  // Every SDK compaction check (and Craft's context bar) reads it through
+  // getCompactionSettings(model), so this one hook covers all model switches.
+  // SettingsManager has a private constructor, so it can't be subclassed instead.
+  const getCompactionSettings = manager.getCompactionSettings.bind(manager);
+  manager.getCompactionSettings = (model) => {
+    const settings = getCompactionSettings(model);
+    const contextWindow = (model as { contextWindow?: unknown } | undefined)?.contextWindow;
+    return {
+      ...settings,
+      reserveTokens: compactionReserveFor(contextWindow, settings.reserveTokens, autoCompactWindow),
+    };
+  };
+  return manager;
 }

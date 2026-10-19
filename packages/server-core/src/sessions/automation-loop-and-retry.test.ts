@@ -118,6 +118,23 @@ describe('source-activation auto-retry', () => {
     expect(asked).toBe(0)
   })
 
+  // Found 2026-10-11: tasks:generate authoring turns ran at the workspace's max thinking and timed out.
+  it('runs a turn at a caller-chosen thinking level without the adaptive check, and keeps it for its retries', async () => {
+    const sm = new SessionManager()
+    let asked = 0
+    ;(sm as any).decisionFeatureActive = (feature: string) => { if (feature === 'adaptiveThinking') asked++; return false }
+    const managed = createManagedSession({ id: 's', name: 's' }, { id: 'w', name: 'w', rootPath: tmpdir(), createdAt: 1 } as never, { messagesLoaded: true })
+    managed.thinkingLevel = 'max'
+
+    expect(await (sm as any).startPreTurnDecisions(managed, 'Author the task.yaml', { thinkingLevel: 'medium' }))
+      .toEqual({ thinkingOverride: 'medium', suggestionHint: null })
+    expect(managed.thinkingLevel).toBe('max')
+    expect(asked).toBe(0)
+    // A source-activation retry of that turn keeps the level
+    expect(await (sm as any).startPreTurnDecisions(managed, 'x\n\n[a activated]', { hidden: true }, { activationResend: true }))
+      .toEqual({ thinkingOverride: 'medium', suggestionHint: null })
+  })
+
   // Found in the 2026-09-30 decision log: every "OAuth token revoked" 401 re-ran both turn-start
   // decisions for the same message and wrote the suggestions follow-up twice.
   it('keeps an auth retry\'s thinking level and hint, asks nothing again and keeps the request\'s trace', async () => {

@@ -58,4 +58,12 @@ describe('ClaudeEventAdapter background task attribution', () => {
     expect(foreign[0]).toMatchObject({ launchedHere: false })
     expect(adapter.wasLaunchedByMainAgent('b5')).toBe(true)
   })
+
+  it('reports what its own background tasks are doing, not a subagent\'s', async () => {
+    await assistantToolUse('toolu_6', 'Agent', { description: 'Review the fix' })
+    await system({ subtype: 'task_started', task_id: 'a6', tool_use_id: 'toolu_6', task_type: 'local_agent', is_backgrounded: true })
+    const own = await system({ subtype: 'task_progress', task_id: 'a6', tool_use_id: 'toolu_6', description: 'Review the fix', summary: 'Reading the evaluator', last_tool_name: 'Read', usage: { total_tokens: 900, tool_uses: 7, duration_ms: 4000 } })
+    expect(own).toEqual([expect.objectContaining({ type: 'task_activity', taskId: 'a6', toolUseId: 'toolu_6', summary: 'Reading the evaluator', lastToolName: 'Read', toolUses: 7 })])
+    expect(await system({ subtype: 'task_progress', task_id: 'n1', tool_use_id: 'toolu_nested', description: 'x', usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 } })).toEqual([])
+  })
 })

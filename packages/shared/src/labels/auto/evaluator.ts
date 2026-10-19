@@ -14,10 +14,15 @@
  * 1. Strip code blocks from message (avoid matching inside code)
  * 2. Walk the label tree, collect all labels with autoRules
  * 3. For each rule: run regex with forced 'g' flag, substitute capture groups
- * 4. Normalize extracted values based on the label's valueType
- * 5. Deduplicate matches (same labelId + value = keep only first)
- * 6. Cap at MAX_MATCHES_PER_MESSAGE to prevent label explosion
- * 7. Return array of AutoLabelMatch ready for session storage
+ * 4. Plain labels (no valueType) are presence-only: the bare label id, from the
+ *    first match. Valued labels normalize the extracted value by valueType; a value
+ *    set_session_labels would reject (a word on a number label) applies the bare label.
+ * 5. Deduplicate matches by meaning (LabelEntrySet: a plain label once, a value
+ *    once; `string` values fold case) against each other and the session's entries,
+ *    and drop a bare match of a label that also matched with a value
+ * 6. Cap the new matches at MAX_MATCHES_PER_MESSAGE to prevent label explosion
+ * 7. Return array of AutoLabelMatch ready for session storage (merge with the
+ *    session's labels through newAutoLabelEntries)
  *
  * Semantic flow: one `noul` question per rule (batched per call), apply the
  * label when the "yes" probability reaches the rule's threshold (default 0.9).
@@ -25,6 +30,8 @@
 
 import type { LabelConfig, AutoLabelRule, RegexAutoLabelRule, SemanticAutoLabelRule } from '../types.ts'
 import { isRegexAutoLabelRule, isSemanticAutoLabelRule, DEFAULT_SEMANTIC_RULE_THRESHOLD } from '../types.ts'
+import { LabelEntrySet, validateLabelValue } from '../values.ts'
+import { foldsValueCase } from '../canonical.ts'
 import type { DecisionRequest, DecisionResult, NoulQuestion } from '../../decisions/types.ts'
 import type { AutoLabelMatch } from './types.ts'
 import { normalizeValue } from './normalize.ts'
@@ -85,19 +92,50 @@ function stripCodeBlocks(text: string): string {
 }
 
 /**
- * Session label entry for a match. Regex matches keep the historical `id::value`
- * form even for an empty value (existing sessions and filters rely on it);
- * semantic matches without a `value` apply the plain label id.
+ * The value a rule stores on `label`, by the rules `set_session_labels` enforces: plain labels (no
+ * `valueType`) are presence-only, so captures, `valueTemplate` and a semantic `value` are ignored on
+ * them; a valued label's value must be valid for its type (a word captured for a number label is
+ * not). Without a value the bare label id is applied.
  */
-/** Session label entry a semantic rule would apply (see autoLabelMatchToEntry). */
-export function semanticRuleEntry(label: LabelConfig, rule: SemanticAutoLabelRule): string {
-  const value = rule.value ? normalizeValue(rule.value, label.valueType) : ''
-  return value ? `${label.id}::${value}` : label.id
+function ruleValue(label: LabelConfig, raw: string | undefined): string {
+  if (!label.valueType || !raw) return ''
+  const value = normalizeValue(raw, label.valueType)
+  return validateLabelValue(value, label.valueType) ? value : ''
 }
 
+/** Session label entry: `id::value` for a valued match, the bare label id otherwise. */
+function labelEntry(labelId: string, value: string): string {
+  return value ? `${labelId}::${value}` : labelId
+}
+
+/** Session label entry a semantic rule would apply (see autoLabelMatchToEntry). */
+export function semanticRuleEntry(label: LabelConfig, rule: SemanticAutoLabelRule): string {
+  return labelEntry(label.id, ruleValue(label, rule.value))
+}
+
+/**
+ * Session label entry for a match. Sessions written by older versions may carry `id::` for an
+ * empty value, or values on plain labels; LabelEntrySet counts those as this entry.
+ */
 export function autoLabelMatchToEntry(match: AutoLabelMatch): string {
-  if (match.via === 'semantic' && !match.value) return match.labelId
-  return `${match.labelId}::${match.value}`
+  return labelEntry(match.labelId, match.value)
+}
+
+/**
+ * The entries `matches` add to a session that already carries `existing`: nothing the session has by
+ * meaning (see LabelEntrySet, with the tree's value-case rule), each new entry once, valued matches
+ * before bare ones (so a label matched both ways is applied once, with its value).
+ */
+export function newAutoLabelEntries(existing: readonly string[], matches: readonly AutoLabelMatch[], labels: LabelConfig[]): string[] {
+  const present = new LabelEntrySet(existing, foldsValueCase(labels))
+  const added: string[] = []
+  for (const match of [...matches.filter(m => m.value), ...matches.filter(m => !m.value)]) {
+    const entry = autoLabelMatchToEntry(match)
+    if (present.has(entry)) continue
+    present.add(entry)
+    added.push(entry)
+  }
+  return added
 }
 
 /**
@@ -107,18 +145,21 @@ export function autoLabelMatchToEntry(match: AutoLabelMatch): string {
  *
  * @param message - The user's message text to scan
  * @param labels - The workspace label tree (from config)
+ * @param existing - The session's label entries: matches it already has are skipped, so they
+ *   never use up the cap
  */
 export function evaluateAutoLabels(
   message: string,
   labels: LabelConfig[],
+  existing: readonly string[] = [],
 ): AutoLabelMatch[] {
   // Strip code blocks before scanning to avoid matching inside code
   const cleanMessage = stripCodeBlocks(message)
 
   const rules = collectAutoLabelRules(labels)
   const matches: AutoLabelMatch[] = []
-  // Track seen entries to deduplicate (same label + same value = skip)
-  const seen = new Set<string>()
+  // One match per plain label and per value, across all rules and the session's entries (see LabelEntrySet)
+  const seen = new LabelEntrySet(existing, foldsValueCase(labels))
 
   for (const { label, rule } of rules) {
     // Stop if we've hit the match limit
@@ -131,15 +172,16 @@ export function evaluateAutoLabels(
     for (const match of ruleMatches) {
       if (matches.length >= MAX_MATCHES_PER_MESSAGE) break
 
-      const key = `${match.labelId}::${match.value}`
-      if (!seen.has(key)) {
-        seen.add(key)
-        matches.push(match)
-      }
+      const entry = autoLabelMatchToEntry(match)
+      if (seen.has(entry)) continue
+      seen.add(entry)
+      matches.push(match)
     }
   }
 
-  return matches
+  // A label that matched both with and without a value is applied once, with its value
+  const valuedIds = new Set(matches.filter(m => m.value).map(m => m.labelId))
+  return matches.filter(m => m.value || !valuedIds.has(m.labelId))
 }
 
 /**
@@ -165,19 +207,21 @@ function evaluateRegexRule(
     while ((match = regex.exec(message)) !== null) {
       // Single-pass $N substitution: prevents injection where captured text
       // contains $N patterns that would be double-substituted
-      let value = rule.valueTemplate
+      // Without a template: the first group, or the whole match for a pattern without groups (an
+      // optional group that took no part leaves no value rather than the matched keyword).
+      const raw = rule.valueTemplate
         ? rule.valueTemplate.replace(/\$(\d+)/g, (_, n) => match![parseInt(n)] ?? '')
-        : match[1] ?? match[0]
-
-      // Normalize based on the label's declared valueType
-      value = normalizeValue(value, label.valueType)
+        : match.length > 1 ? match[1] : match[0]
 
       matches.push({
         labelId: label.id,
-        value,
+        value: ruleValue(label, raw),
         matchedText: match[0],
         via: 'regex',
       })
+
+      // A plain label is presence-only: its first match says everything
+      if (!label.valueType) break
 
       // Prevent infinite loop on zero-length matches
       if (match[0].length === 0) {
@@ -232,18 +276,22 @@ export async function evaluateSemanticAutoLabels(
   message: string,
   labels: LabelConfig[],
   decide: SemanticDecisionFn,
-  /** `skipEntries`: session label entries already applied; their rules are not asked again. */
-  options: { skipEntries?: ReadonlySet<string> } = {},
+  /**
+   * `skipEntries`: the session's label entries; rules whose entry the session already has (by
+   * meaning, see LabelEntrySet) are not asked again.
+   */
+  options: { skipEntries?: readonly string[] | ReadonlySet<string> } = {},
 ): Promise<AutoLabelMatch[]> {
-  const skip = options.skipEntries
-  const rules = collectSemanticAutoLabelRules(labels).filter(({ label, rule }) => !skip?.has(semanticRuleEntry(label, rule)))
+  const foldsCase = foldsValueCase(labels)
+  const skip = new LabelEntrySet(options.skipEntries, foldsCase)
+  const rules = collectSemanticAutoLabelRules(labels).filter(({ label, rule }) => !skip.has(semanticRuleEntry(label, rule)))
   if (rules.length === 0) return []
 
   const cleanMessage = stripCodeBlocks(message).trim().slice(0, SEMANTIC_RULE_MAX_MESSAGE_CHARS)
   if (cleanMessage.length < SEMANTIC_RULE_MIN_MESSAGE_CHARS) return []
 
   const matches: AutoLabelMatch[] = []
-  const seen = new Set<string>()
+  const seen = new LabelEntrySet([], foldsCase)
 
   for (let offset = 0; offset < rules.length && matches.length < MAX_MATCHES_PER_MESSAGE; offset += SEMANTIC_RULES_PER_CALL) {
     const chunk = rules.slice(offset, offset + SEMANTIC_RULES_PER_CALL)
@@ -265,10 +313,10 @@ export async function evaluateSemanticAutoLabels(
         : DEFAULT_SEMANTIC_RULE_THRESHOLD
       if (answer.noul < threshold) return
 
-      const value = rule.value ? normalizeValue(rule.value, label.valueType) : ''
-      const key = `${label.id}::${value}`
-      if (seen.has(key)) return
-      seen.add(key)
+      const value = ruleValue(label, rule.value)
+      const entry = labelEntry(label.id, value)
+      if (seen.has(entry)) return
+      seen.add(entry)
       matches.push({
         labelId: label.id,
         value,

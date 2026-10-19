@@ -557,6 +557,13 @@ export interface AgentEventUsage {
   costUsd?: number;
   /** Model's context window size in tokens (from SDK modelUsage) */
   contextWindow?: number;
+  /**
+   * Totals for the backend's whole session so far (Claude SDK `total_cost_usd` and `modelUsage`,
+   * subagents included). They grow across turns and resumes and restart at /clear or a new SDK
+   * session, so consumers add the change since the last totals instead of summing; when present
+   * they replace `costUsd`/`outputTokens` for cumulative accounting.
+   */
+  runningTotals?: { costUsd: number; outputTokens: number };
 }
 
 /**
@@ -597,6 +604,8 @@ export type AgentEvent =
   | { type: 'task_backgrounded'; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow' | 'task'; workflowId?: string }
   | { type: 'shell_backgrounded'; toolUseId: string; shellId: string; intent?: string; command?: string; turnId?: string }
   | { type: 'task_progress'; toolUseId: string; elapsedSeconds: number; turnId?: string }
+  /** What a running background task of the session's own agent is doing (SDK `task_progress`). */
+  | { type: 'task_activity'; taskId: string; toolUseId?: string; /** One-line, model-generated status ("Analyzing the auth module") when the SDK has one */ summary?: string; lastToolName?: string; toolUses?: number; turnId?: string }
   | { type: 'task_completed'; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; summary?: string; turnId?: string; toolUseId?: string; /** The session's own agent started it (a top-level tool call), not a subagent. */ launchedHere?: boolean }
   | { type: 'workflow_agent_completed'; workflowId: string; agentId: string; turnId?: string }
   | { type: 'shell_killed'; shellId: string; turnId?: string }

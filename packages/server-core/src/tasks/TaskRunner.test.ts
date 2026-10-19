@@ -22,6 +22,8 @@ function specOf(raw: unknown): TaskSpec {
   return r.data;
 }
 
+type CompletionOpts = Pick<SessionCompletionEvent, 'finalText' | 'backgroundWorkRunning' | 'fromUser' | 'tokenUsage'> & { reason?: SessionCompletionEvent['reason'] };
+
 /** Mock host: records calls; the test drives completions via complete(). */
 class MockHost implements ConductorSessionHost {
   // A Set iterated as a snapshot, mirroring SessionManager.emitSessionComplete — the Conductor keeps
@@ -34,7 +36,6 @@ class MockHost implements ConductorSessionHost {
   readonly columns: { sessionId: string; column: string | null }[] = [];
   readonly nodeCounts: { sessionId: string; count: number }[] = [];
   readonly cancelled: string[] = [];
-  readonly finalTextById = new Map<string, string>();
 
   async createSession(_workspaceId: string, options: CreateSessionOptions): Promise<{ id: string }> {
     const id = `sess-${options.name}`;
@@ -62,9 +63,6 @@ class MockHost implements ConductorSessionHost {
       this.listeners.delete(listener);
     };
   }
-  getSessionFinalText(sessionId: string): string | undefined {
-    return this.finalTextById.get(sessionId);
-  }
   workingDirById = new Map<string, string>();
   getSessionWorkingDirectory(sessionId: string): string | undefined {
     return this.workingDirById.get(sessionId);
@@ -80,16 +78,18 @@ class MockHost implements ConductorSessionHost {
   dispatchedNames(): string[] {
     return this.created.map((c) => c.options.name!).filter(Boolean);
   }
-  complete(nodeId: string, opts: { reason?: SessionCompletionEvent['reason']; finalText?: string; tokenUsage?: TokenUsage } = {}): void {
+  complete(nodeId: string, opts: CompletionOpts = {}): void {
     this.completeSession(this.sessionIdFor(nodeId), opts);
   }
   /** Fire a completion for an arbitrary session id (e.g. the orchestrator's verification verdict). */
-  completeSession(sessionId: string, opts: { reason?: SessionCompletionEvent['reason']; finalText?: string; tokenUsage?: TokenUsage } = {}): void {
+  completeSession(sessionId: string, opts: CompletionOpts = {}): void {
     const evt: SessionCompletionEvent = {
       sessionId,
       workspaceId: 'ws',
       reason: opts.reason ?? 'complete',
       finalText: opts.finalText,
+      backgroundWorkRunning: opts.backgroundWorkRunning,
+      fromUser: opts.fromUser,
       tokenUsage: opts.tokenUsage,
     };
     for (const listener of [...this.listeners]) listener(evt);
@@ -558,10 +558,10 @@ describe('TaskRunner (Conductor)', () => {
     runner.run('rtok', { runId: 'r1' });
     await tick();
 
-    host.complete('a', { reason: 'timeout' });
+    host.complete('a', { reason: 'error' });
     await tick();
     const retryPrompt = host.sent.filter((s) => s.sessionId === 'sess-a')[1]!.message;
-    expect(retryPrompt).toContain('Previous attempt failed: timeout');
+    expect(retryPrompt).toContain('Previous attempt failed: error');
     expect(retryPrompt).toContain('do a');
 
     host.complete('a', { finalText: 'OK' });
@@ -1023,18 +1023,174 @@ describe('TaskRunner (Conductor)', () => {
     expect(host.statuses.some((s) => s.sessionId === 'sess-a' && s.status === 'needs-review')).toBe(true);
   });
 
-  it('still marks a node done on empty text when it declares no outputs (lenient default)', async () => {
-    // The empty-output guard must only bite nodes that declared outputs; output-less nodes keep the
-    // lenient "completed = done" behavior.
-    saveTaskSpec(root, specOf({ id: 'lenient', title: 'Lenient', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+  it('fails a node whose turn finished without a reply, outputs declared or not', async () => {
+    // Found 2026-10-11: a step that ended with no reply was marked done and its dependents started
+    // with nothing.
+    saveTaskSpec(root, specOf({ id: 'noreply', title: 'NoReply', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
     const runner = makeRunner();
-    runner.run('lenient', { runId: 'r1' });
+    runner.run('noreply', { runId: 'r1' });
     await tick();
 
     host.complete('a', { finalText: '' });
     await tick();
 
-    expect(runner.getRunState('lenient', 'r1')!.nodes.find((n) => n.id === 'a')!.state).toBe('done');
+    expect(runner.getRunState('noreply', 'r1')!.nodes.find((n) => n.id === 'a')!.state).toBe('failed');
+    expect(readRunLog(root, 'noreply', 'r1').some((e) => e.kind === 'node-finished' && e.reason === 'finished without a reply')).toBe(true);
+  });
+
+  describe('a step that ended a turn without finishing', () => {
+    const chain = (id: string) => specOf({
+      id,
+      title: id,
+      goal: 'g',
+      nodes: [
+        { id: 'explore', prompt: 'Map the site' },
+        { id: 'journeys', prompt: 'Based on the exploration output, write the journeys', depends_on: ['explore'] },
+      ],
+    });
+
+    // Found 2026-10-11 (analyze-lizaos): the user stopped the exploration step to give it a login;
+    // it was marked done with no output 1 ms later, the next steps started without it, and the reply
+    // it wrote 40 minutes later was ignored.
+    it.each(['interrupted', 'timeout'] as const)('waits for the user after a stop (%s) and finishes with the turn that completes it', async (reason) => {
+      saveTaskSpec(root, chain(`stop-${reason}`));
+      const runner = makeRunner();
+      runner.run(`stop-${reason}`, { runId: 'r1' });
+      await tick();
+
+      host.complete('explore', { reason });
+      await tick();
+      let snap = runner.getRunState(`stop-${reason}`, 'r1')!;
+      expect(snap.status).toBe('running');
+      expect(snap.nodes.find((n) => n.id === 'explore')!.state).toBe('running');
+      expect(host.promptFor('journeys')).toBeUndefined();
+      expect(host.statuses).toContainEqual({ sessionId: 'sess-explore', status: 'needs-review' });
+      expect(readRunLog(root, `stop-${reason}`, 'r1')).toContainEqual(
+        expect.objectContaining({ kind: 'node-waiting', nodeId: 'explore', reason: 'stopped' }),
+      );
+
+      host.complete('explore', { finalText: 'SITE MAP' });
+      await tick();
+      snap = runner.getRunState(`stop-${reason}`, 'r1')!;
+      expect(snap.nodes.find((n) => n.id === 'explore')!.state).toBe('done');
+      expect(host.promptFor('journeys')).toContain('SITE MAP');
+    });
+
+    // A Stop keeps background agents alive; one finishing wakes the session before the user has
+    // steered the step. That wake-up turn must not complete it.
+    it('keeps a stopped step waiting through a background wake-up until the user\'s turn', async () => {
+      saveTaskSpec(root, chain('wake'));
+      const runner = makeRunner();
+      runner.run('wake', { runId: 'r1' });
+      await tick();
+
+      host.complete('explore', { reason: 'interrupted' });
+      host.complete('explore', { finalText: 'Agent: MCP latencies.', fromUser: false });
+      await tick();
+      expect(runner.getRunState('wake', 'r1')!.nodes.find((n) => n.id === 'explore')!.state).toBe('running');
+      expect(host.promptFor('journeys')).toBeUndefined();
+
+      host.complete('explore', { finalText: 'Signed in; SITE MAP.', fromUser: true });
+      await tick();
+      expect(readNodeOutput(root, 'wake', 'r1', 'explore')!.text).toBe('Agent: MCP latencies.\n\nSigned in; SITE MAP.');
+    });
+
+    it('waits for its background agents and keeps the reply of every turn', async () => {
+      saveTaskSpec(root, chain('bg'));
+      const runner = makeRunner();
+      runner.run('bg', { runId: 'r1' });
+      await tick();
+
+      host.complete('explore', { finalText: 'Portal mapped; two research agents still running.', backgroundWorkRunning: 2 });
+      await tick();
+      host.complete('explore', { finalText: 'Agent 1: MCP latencies.', backgroundWorkRunning: 1 });
+      await tick();
+      expect(runner.getRunState('bg', 'r1')!.nodes.find((n) => n.id === 'explore')!.state).toBe('running');
+      expect(host.promptFor('journeys')).toBeUndefined();
+      expect(host.statuses.some((s) => s.sessionId === 'sess-explore' && s.status === 'needs-review')).toBe(false);
+
+      host.complete('explore', { finalText: 'Agent 2: market landscape.', backgroundWorkRunning: 0 });
+      await tick();
+      expect(readNodeOutput(root, 'bg', 'r1', 'explore')!.text).toBe(
+        'Portal mapped; two research agents still running.\n\nAgent 1: MCP latencies.\n\nAgent 2: market landscape.',
+      );
+      expect(host.promptFor('journeys')).toContain('Agent 2: market landscape.');
+    });
+
+    it('fails on a backend error instead of waiting', async () => {
+      saveTaskSpec(root, chain('err'));
+      const runner = makeRunner();
+      runner.run('err', { runId: 'r1' });
+      await tick();
+      host.complete('explore', { reason: 'error', backgroundWorkRunning: 1 });
+      await tick();
+      expect(runner.getRunState('err', 'r1')!.nodes.find((n) => n.id === 'explore')!.state).toBe('failed');
+    });
+  });
+
+  describe('depends_on hands the upstream reply to the dependent', () => {
+    it('adds the reply unless the prompt already places it with ${nodes.<id>.output}', async () => {
+      saveTaskSpec(root, specOf({
+        id: 'hand',
+        title: 'Hand',
+        goal: 'g',
+        nodes: [
+          { id: 'explore', title: 'Explore the platform', prompt: 'Map the site' },
+          { id: 'journeys', prompt: 'Based on the exploration output, write the journeys', depends_on: ['explore'] },
+          { id: 'inline', prompt: 'Summarize: ${nodes.explore.output}', depends_on: ['explore'] },
+        ],
+      }));
+      const runner = makeRunner();
+      runner.run('hand', { runId: 'r1' });
+      await tick();
+      host.completeSession('sess-Explore the platform', { finalText: 'SITE MAP' }); // the mock names sessions by title
+      await tick();
+
+      expect(host.promptFor('journeys')).toBe(
+        'Replies of the step this one depends on:\n\n### Explore the platform\nSITE MAP\n\n---\n\nBased on the exploration output, write the journeys',
+      );
+      expect(host.promptFor('inline')).toBe('Summarize: SITE MAP');
+    });
+
+    it('cuts a very long reply and points at the full one', async () => {
+      saveTaskSpec(root, specOf({
+        id: 'long',
+        title: 'Long',
+        goal: 'g',
+        nodes: [{ id: 'a', prompt: 'a' }, { id: 'b', prompt: 'b', depends_on: ['a'] }],
+      }));
+      const runner = makeRunner();
+      runner.run('long', { runId: 'r1' });
+      await tick();
+      host.complete('a', { finalText: 'x'.repeat(50_000) });
+      await tick();
+
+      const prompt = host.promptFor('b')!;
+      expect(prompt.length).toBeLessThan(41_000);
+      expect(prompt).toContain(`the full reply is in ${join(root, 'tasks', 'long', 'runs', 'r1', 'nodes', 'a.json')}`);
+    });
+  });
+
+  it('waits out a stopped verification turn instead of reading it as a malformed verdict', async () => {
+    saveTaskSpec(root, specOf({ id: 'vstop', title: 'VStop', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+    const runner = makeRunner();
+    runner.run('vstop', { runId: 'r1', orchestratorSessionId: 'orch' });
+    await tick();
+    host.complete('a', { finalText: 'A' });
+    await tick();
+    expect(runner.getRunState('vstop', 'r1')!.status).toBe('verifying');
+    const asked = host.sent.filter((s) => s.sessionId === 'orch').length;
+
+    host.completeSession('orch', { reason: 'interrupted' });
+    await tick();
+    host.completeSession('orch', { finalText: 'Checking with two agents.', backgroundWorkRunning: 2 });
+    await tick();
+    expect(runner.getRunState('vstop', 'r1')!.status).toBe('verifying');
+    expect(host.sent.filter((s) => s.sessionId === 'orch')).toHaveLength(asked); // nothing re-asked
+
+    host.completeSession('orch', { finalText: 'All good.\nVERDICT: PASS' });
+    await tick();
+    expect(runner.getRunState('vstop', 'r1')!.status).toBe('completed');
   });
 
   describe('child outcome via the decision model', () => {

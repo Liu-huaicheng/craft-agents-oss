@@ -414,7 +414,7 @@ function deriveAutomationName(event: string, matcher: AutomationsConfigMatcher):
 /** Derive a summary line from the matcher/cron/event */
 function deriveAutomationSummary(event: string, matcher: AutomationsConfigMatcher): string {
   if (matcher.cron) {
-    const runs = computeNextRuns(matcher.cron, 1)
+    const runs = computeNextRuns(matcher.cron, 1, matcher.timezone)
     if (runs.length > 0) {
       const next = runs[0]!
       const tz = matcher.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone

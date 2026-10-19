@@ -176,6 +176,8 @@ export interface TransportConnectionState {
   nextRetryInMs?: number
   lastError?: TransportConnectionError
   lastClose?: TransportCloseInfo
+  /** Largest message the connected server accepts (from handshake_ack); absent for older servers */
+  maxMessageBytes?: number
   updatedAt: number
 }
 
@@ -232,7 +234,12 @@ import type {
   DirectoryListingResult,
   RemoteSessionTransferPayload,
   ImportRemoteSessionTransferResult,
+  BackgroundTaskOutput,
+  StopBackgroundTaskResult,
 } from '@craft-agent/shared/protocol'
+
+/** Native window material the renderer may paint translucently over (see ThemeContext data-vibrancy). */
+export type WindowVibrancy = 'under-window' | 'mica'
 
 export interface ElectronAPI {
   // Session management
@@ -244,8 +251,10 @@ export interface ElectronAPI {
   deleteSession(sessionId: string): Promise<void>
   sendMessage(sessionId: string, message: string, attachments?: FileAttachment[], storedAttachments?: StoredAttachmentType[], options?: SendMessageOptions): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
-  killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }>
-  getTaskOutput(taskId: string): Promise<string | null>
+  /** A background task's output so far (shell tail, or an agent's latest message + steps); null when there is none */
+  getBackgroundTaskOutput(sessionId: string, taskId: string, kind?: 'agent' | 'shell' | 'workflow'): Promise<BackgroundTaskOutput | null>
+  /** Stop one background task (shell, agent or workflow); the stopped status arrives as a task_completed event */
+  stopBackgroundTask(sessionId: string, taskId: string): Promise<StopBackgroundTaskResult>
 
   // Tasks (Conductor)
   validateTask(workspaceId: string, yaml: string): Promise<TaskValidationResultDto>
@@ -399,6 +408,9 @@ export interface ElectronAPI {
   // System warnings (startup checks)
   getSystemWarnings(): Promise<{ vcredistMissing: boolean; downloadUrl?: string }>
 
+  /** Native material behind this window (macOS vibrancy, Windows 11 22H2+ Mica); null when the window is opaque. */
+  getWindowVibrancy(): WindowVibrancy | null
+
   // Shell operations
   openUrl(url: string): Promise<void>
   openFile(path: string): Promise<void>
@@ -496,8 +508,10 @@ export interface ElectronAPI {
   getDefaultPermissionsConfig(): Promise<{ config: import('@craft-agent/shared/agent').PermissionsConfigFile | null; path: string }>
   getMcpTools(workspaceId: string, sourceSlug: string): Promise<McpToolsResult>
 
-  // OAuth (server-owned credentials, client-orchestrated flow)
-  performOAuth(args: { sourceSlug: string; sessionId?: string; authRequestId?: string }): Promise<{ success: boolean; error?: string; email?: string }>
+  // OAuth (server-owned credentials, client-orchestrated flow). One flow per workspace + source:
+  // a call while another session's sign-in for the source is live waits for that one instead.
+  // `restart` replaces the live sign-in (its browser window was closed or lost).
+  performOAuth(args: { sourceSlug: string; sessionId?: string; authRequestId?: string; restart?: boolean }): Promise<{ success: boolean; error?: string; email?: string }>
   oauthRevoke(sourceSlug: string): Promise<{ success: boolean }>
 
   // Session content search (full-text search via ripgrep)
@@ -622,8 +636,8 @@ export interface ElectronAPI {
   onNotificationNavigate(callback: (data: { workspaceId: string; sessionId: string }) => void): () => void
 
   // Theme preferences sync across windows
-  broadcastThemePreferences(preferences: { mode: string; colorTheme: string; font: string }): Promise<void>
-  onThemePreferencesChange(callback: (preferences: { mode: string; colorTheme: string; font: string }) => void): () => void
+  broadcastThemePreferences(preferences: { mode: string; colorTheme: string; font: string; motion?: string }): Promise<void>
+  onThemePreferencesChange(callback: (preferences: { mode: string; colorTheme: string; font: string; motion?: string }) => void): () => void
 
   // Workspace theme sync across windows
   broadcastWorkspaceThemeChange(workspaceId: string, themeId: string | null): Promise<void>
@@ -681,6 +695,12 @@ export interface ElectronAPI {
   setDefaultLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   getDefaultThinkingLevel(): Promise<ThinkingLevel>
   setDefaultThinkingLevel(level: ThinkingLevel): Promise<{ success: boolean; error?: string }>
+  /** Claude auto-compact window in tokens; null = the SDK default (the model's full window) */
+  getAutoCompactWindow(): Promise<number | null>
+  setAutoCompactWindow(tokens: number | null): Promise<void>
+  /** Model for Claude subagents whose call names none; null = the session's model */
+  getSubagentModel(): Promise<'haiku' | 'sonnet' | null>
+  setSubagentModel(model: 'haiku' | 'sonnet' | null): Promise<void>
   setWorkspaceDefaultLlmConnection(workspaceId: string, slug: string | null): Promise<{ success: boolean; error?: string }>
 
   // Projects (workspace-scoped)
@@ -717,6 +737,7 @@ export interface ElectronAPI {
   publishPage(workspaceId: string, pageSlug: string, options: { includeData: boolean; password?: string; viewOnlyAcknowledged?: boolean }): Promise<import('@craft-agent/shared/pages/types').PageConfig>
   setPagePublicationPassword(workspaceId: string, pageSlug: string, password: string | null): Promise<import('@craft-agent/shared/pages/types').PageConfig>
   unpublishPage(workspaceId: string, pageSlug: string): Promise<{ config: import('@craft-agent/shared/pages/types').PageConfig; warning?: 'remote-copy-may-remain' }>
+  publishPageAsClaudeArtifact(workspaceId: string, pageSlug: string): Promise<import('@craft-agent/shared/pages/types').PageConfig>
   /** Read a page's cached poster as a data URL — only returns when fresh (digest matches current content). */
   getPageThumbnail(workspaceId: string, pageSlug: string): Promise<{ dataUrl: string; digest: string } | null>
   /** Request a (re)capture of a page's poster (no-op on hosts without a capturer). */

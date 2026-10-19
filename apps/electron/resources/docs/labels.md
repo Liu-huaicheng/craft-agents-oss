@@ -136,7 +136,7 @@ Values are inferred from the raw string at parse time:
 
 **Inference order:** ISO date check → number check → string fallback.
 
-The optional `valueType` in config is a hint only — the parser always infers from the raw value regardless. `link` is a display/affordance hint (clickable, scheme-stripped chip, opens in the browser); a link value still stores and parses as a plain string.
+`valueType` decides whether a label carries values at all: a label without one is presence-only (`"bug"`), so `set_session_labels` rejects a value on it, auto-label rules apply only the bare id, and a value already stored on one is dropped when the session loads. Within a valued label the parser still infers the type from the raw value. `link` is a display/affordance hint (clickable, scheme-stripped chip, opens in the browser); a link value still stores and parses as a plain string.
 
 ## Adding Labels
 
@@ -189,6 +189,8 @@ This validates:
 
 Auto-label rules automatically scan user messages and apply labels with extracted values. Configure regex patterns on any label to trigger automatic tagging.
 
+On a plain label (no `valueType`) a rule only applies the label itself: captures and `valueTemplate` are ignored, and the label is added once however often, and in whatever case, the pattern matches. Give the label a `valueType` to store extracted values.
+
 ### Configuration
 
 Add `autoRules` to any label in `config.json`:
@@ -220,7 +222,7 @@ Add `autoRules` to any label in `config.json`:
 |----------|------|-------------|
 | `pattern` | string | **Required.** Regex with capture groups. Uses `flags` (default: `gi`). |
 | `flags` | string | Regex flags (default: `gi` — global, case-insensitive). `g` is always enforced. |
-| `valueTemplate` | string | Template using `$1`, `$2` for capture group substitution. If omitted, uses first capture group. |
+| `valueTemplate` | string | Template using `$1`, `$2` for capture group substitution. If omitted, uses first capture group. Valued labels only (ignored on plain labels). |
 | `description` | string | Human-readable description of what this rule matches. |
 
 ### Regex Patterns
@@ -237,7 +239,7 @@ Rules use JavaScript regular expressions with capture groups:
 
 - **Global matching**: The `g` flag is always enforced, so all occurrences in a message are found
 - **Capture groups**: `$1`, `$2`, etc. are replaced with matched groups in `valueTemplate`
-- **Multiple matches**: "CRA-1 and CRA-2" produces two label entries on the same label
+- **Multiple matches**: on a valued label, "CRA-1 and CRA-2" produces two label entries
 - **Code block stripping**: Content inside fenced code blocks and inline code is ignored
 
 ### Value Normalization
@@ -257,7 +259,7 @@ Extracted values are normalized based on the label's `valueType`:
 - **Timing**: Rules are evaluated when a user message is sent (both fresh and queued messages)
 - **User messages only**: Assistant output and tool results are not scanned
 - **Code stripping**: Fenced code blocks and inline code are stripped before evaluation
-- **Deduplication**: Same label+value won't be added twice to a session
+- **Deduplication**: A plain label is added once per session (older entries such as `bug::bug` count as `bug`); a valued label once per value — `string` values compare case-insensitively (`CRA-1` = `cra-1`), links, numbers and dates exactly. A label matched both with and without a value is applied once, with the value; a value invalid for the label's type (a word on a number label) applies the bare label
 - **Match limit**: Maximum 10 matches per message (prevents label explosion from pasted data)
 - **Persistence**: Auto-applied labels are stored on the session
 - **Multiple rules**: All rules on a label are evaluated; all matches are collected
@@ -282,7 +284,7 @@ A semantic rule is a yes/no question instead of a regex. The decision model (Jev
 |----------|------|-------------|
 | `semantic` | string | **Required.** The yes/no question, in English. Keep it specific. |
 | `threshold` | number | "Yes" probability needed to apply the label, `0 < threshold <= 1`. Default `0.9`. |
-| `value` | string | Fixed value for valued labels (`area::mobile-app`). Omitted → the plain label id is applied. |
+| `value` | string | Fixed value for valued labels (`area::mobile-app`). Omitted, or on a plain label → the plain label id is applied. |
 | `description` | string | Human-readable note. |
 
 - **Inert without the decision model**: when the user has not enabled it (or disabled the `semanticLabels` feature toggle), semantic rules are validated and stored but never evaluated.

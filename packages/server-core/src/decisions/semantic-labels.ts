@@ -9,13 +9,13 @@
  */
 
 import type { DecisionResult } from '@craft-agent/shared/decisions'
-import type { LabelConfig } from '@craft-agent/shared/labels'
+import { LabelEntrySet, foldsValueCase, type LabelConfig } from '@craft-agent/shared/labels'
 import { collectSemanticAutoLabelRules, evaluateSemanticAutoLabels, semanticRuleEntry, type AutoLabelMatch } from '@craft-agent/shared/labels/auto'
 import { openDecisionPoint, recordDecisionOutcome, type DecisionPointDeps } from './decision-point'
 
 export interface SemanticLabelsDeps extends DecisionPointDeps {
   sessionId: string
-  /** Label entries the session already has: their rules are not asked again (no call, no double count). */
+  /** Label entries the session already has (by meaning, see LabelEntrySet): their rules are not asked again (no call, no double count). */
   existingEntries?: readonly string[]
 }
 
@@ -31,8 +31,9 @@ export function hasSemanticAutoLabelRules(labels: LabelConfig[]): boolean {
 export async function evaluateSemanticLabelsForMessage(message: string, labels: LabelConfig[], deps: SemanticLabelsDeps): Promise<AutoLabelMatch[]> {
   // Cheap gate before touching config.json or the vault: most trees have no semantic rules,
   // and a rule whose label the session already carries has nothing left to add.
-  const skipEntries = new Set(deps.existingEntries ?? [])
-  if (!collectSemanticAutoLabelRules(labels).some(({ label, rule }) => !skipEntries.has(semanticRuleEntry(label, rule)))) return []
+  const skipEntries = deps.existingEntries ?? []
+  const present = new LabelEntrySet(skipEntries, foldsValueCase(labels))
+  if (!collectSemanticAutoLabelRules(labels).some(({ label, rule }) => !present.has(semanticRuleEntry(label, rule)))) return []
 
   const decide = await openDecisionPoint({ ...deps, feature: 'semanticLabels', record: 'semantic_labels' })
   if (!decide) return []

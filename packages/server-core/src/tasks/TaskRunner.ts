@@ -8,7 +8,9 @@
  *      `${nodes.<id>.output}` / `${params.<name>}` / `${inputs.<name>}` into the prompt,
  *   3. subscribes to SessionManager's in-process `onSessionComplete` seam,
  *   4. on completion reads the child's final assistant text as the node output,
- *      feeds it to dependents, and reschedules,
+ *      feeds it to dependents (every `depends_on` edge carries it), and reschedules.
+ *      A step the user stopped, or one whose background agents are still running,
+ *      is not finished: it stays running until a later turn completes it,
  *   5. drives child `sessionStatus` + `kanbanColumn` so the board renders the live DAG,
  *   6. persists an append-only run-log under `tasks/<slug>/runs/<runId>/`.
  *
@@ -27,11 +29,14 @@ import {
   type RunLogEntry,
   type NodeRunState,
   nodeTitle,
+  nodeDeps,
+  extractRefs,
   interpolateRefs,
   materializeDeps,
   appendRunLog,
   writeNodeOutput,
   readNodeOutput,
+  nodeOutputPath,
   readRunLog,
   loadTaskSpec,
   writeRunSpecSnapshot,
@@ -56,7 +61,6 @@ export interface ConductorSessionHost {
   setTaskNodeCount(sessionId: string, count: number): Promise<void>;
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>;
   onSessionComplete(listener: (evt: SessionCompletionEvent) => void): () => void;
-  getSessionFinalText(sessionId: string): string | undefined;
   /** Resolved working directory of a session, so children inherit the orchestrator's cwd. */
   getSessionWorkingDirectory(sessionId: string): string | undefined;
 }
@@ -155,6 +159,11 @@ const DONE_STATUS = 'done';
 // We flag a failed child as 'needs-review' (amber, attention needed); the board's 'failed' run-state
 // is derived from the run-log, not from a session status.
 const FAILED_STATUS = 'needs-review';
+// A step the user stopped waits for them (a message continues it); the same amber status flags it.
+const WAITING_FOR_USER_STATUS = 'needs-review';
+// Upstream replies handed to a dependent through `depends_on` are capped per step; the full text is
+// in the run's nodes/<id>.json.
+const MAX_UPSTREAM_REPLY_CHARS = 40_000;
 
 // A malformed verdict (no parseable VERDICT line) is re-asked this many times before we give up and
 // fail the run. These re-asks are format-only — they do NOT consume the repair (max_iterations) budget.
@@ -172,6 +181,10 @@ interface NodeStateEntry {
   attempt: number;
   /** Reason the previous attempt failed, fed back into the retry prompt (failure-aware retry). */
   lastFailure?: string;
+  /** Replies of this attempt's completed turns while it waited for background work; joined into the output. */
+  replies: string[];
+  /** The user stopped this attempt: only a turn answering their message completes it. */
+  waitingForUser?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +230,7 @@ class ActiveRun {
     // Runner-side clamp (belt-and-suspenders: the schema already caps `max_iterations` at the same
     // bound, so a parsed spec can't exceed it — but a programmatically built spec might).
     this.maxRepairs = Math.min(spec.max_iterations ?? DEFAULT_REPAIR_ATTEMPTS, MAX_REPAIR_ATTEMPTS_CAP);
-    for (const node of spec.nodes) this.state.set(node.id, { state: 'pending', attempt: 0 });
+    for (const node of spec.nodes) this.state.set(node.id, { state: 'pending', attempt: 0, replies: [] });
   }
 
   // --- lifecycle ---
@@ -376,6 +389,8 @@ class ActiveRun {
     const st = this.state.get(node.id)!;
     st.state = 'running';
     st.attempt += 1;
+    st.replies = [];
+    st.waitingForUser = false;
     this.inFlight += 1;
     this.log({ kind: 'node-scheduled', nodeId: node.id });
   }
@@ -442,6 +457,8 @@ class ActiveRun {
     }
     let text = interpolateRefs(node.prompt ?? '', { nodeOutputs: this.outputs, params: this.opts.params });
     text = text.replace(INPUTS_REF_RE, (raw, name: string) => (name in inputValues ? String(inputValues[name]) : raw));
+    const upstream = this.upstreamReplies(node);
+    if (upstream) text = `${upstream}\n\n${text}`;
 
     // Failure-aware retry: prepend the prior failure so a retried session knows what went wrong
     // instead of blindly repeating a deterministic failure.
@@ -452,6 +469,31 @@ class ActiveRun {
     return text;
   }
 
+  /**
+   * The replies of the `depends_on` steps that the prompt does not already pull in with
+   * ${nodes.<id>.output} (directly or through `inputs`). Authors add the edge and write "based on
+   * the exploration output"; the dependent used to start without it (found 2026-10-11).
+   */
+  private upstreamReplies(node: TaskNode): string | null {
+    const pulledIn = new Set<string>();
+    const refTexts = [node.prompt ?? '', ...Object.values(node.inputs ?? {}).map((ref) => (typeof ref === 'string' ? ref : ref.from))];
+    for (const text of refTexts) {
+      for (const ref of extractRefs(text)) if (ref.kind === 'node' && !ref.field) pulledIn.add(ref.nodeId);
+    }
+    const sections: string[] = [];
+    for (const depId of nodeDeps(node)) {
+      const reply = this.outputs[depId]?.text;
+      if (pulledIn.has(depId) || !reply?.trim()) continue;
+      const dep = this.spec.nodes.find((n) => n.id === depId);
+      const body = reply.length > MAX_UPSTREAM_REPLY_CHARS
+        ? `${reply.slice(0, MAX_UPSTREAM_REPLY_CHARS)}\n…[cut at ${MAX_UPSTREAM_REPLY_CHARS} characters; the full reply is in ${nodeOutputPath(this.deps.workspaceRoot, this.slug, this.runId, depId)}]`
+        : reply;
+      sections.push(`### ${dep ? nodeTitle(dep) : depId}\n${body}`);
+    }
+    if (sections.length === 0) return null;
+    return [`Replies of the step${sections.length === 1 ? '' : 's'} this one depends on:`, '', ...sections, '', '---'].join('\n');
+  }
+
   // --- completion ---
 
   private onSessionComplete(evt: SessionCompletionEvent): void {
@@ -459,10 +501,14 @@ class ActiveRun {
     if (!nodeId) return; // not one of our child nodes
     const st = this.state.get(nodeId);
     if (!st || st.state !== 'running') return; // already settled/cancelled
+    // A retried node runs in a new session; a turn of the replaced one (woken by its own background
+    // work, or messaged by the user) is not this attempt's result.
+    if (st.sessionId !== evt.sessionId) return;
 
     if (evt.tokenUsage) {
       // `tokenUsage` is cumulative-per-session; add only the delta since this session's last
-      // observed total so a node that ever runs >1 turn (future retry/loop) can't double-count.
+      // observed total, since a node can run more than one turn (stopped and continued, woken by
+      // background work).
       const cumulative = (evt.tokenUsage.inputTokens ?? 0) + (evt.tokenUsage.outputTokens ?? 0);
       const prev = this.sessionTokens.get(evt.sessionId) ?? 0;
       this.tokensUsed += Math.max(0, cumulative - prev);
@@ -475,35 +521,41 @@ class ActiveRun {
       this.pauseForBudget();
     }
 
-    if (evt.reason === 'complete') {
-      const text = evt.finalText ?? this.deps.host.getSessionFinalText(evt.sessionId) ?? '';
-
-      // A clean turn-completion is not proof of success: a node that declared `outputs` but
-      // produced no text delivered nothing. Treat that as a failure (retry/needs-review) instead
-      // of silently marking it done. Nodes with no declared outputs keep the lenient behavior.
-      const node = this.spec.nodes.find((n) => n.id === nodeId);
-      if ((node?.outputs?.length ?? 0) > 0 && text.trim() === '') {
-        this.failNode(nodeId, 'completed without producing declared output', evt.sessionId);
-        return;
-      }
-
-      if (this.deps.classifyNodeOutcome && (this.deps.classifyNodeOutcome.isActive?.() ?? true)) {
-        void this.finishNodeAfterOutcomeCheck(nodeId, evt.sessionId, text);
-        return;
-      }
-      this.markNodeDone(nodeId, evt.sessionId, text);
-    } else if (evt.reason === 'interrupted') {
-      // Externally aborted while running → cancelled (re-dispatched on resume). We do not
-      // auto-retry here to avoid a stop/retry loop.
-      st.state = 'cancelled';
-      this.inFlight = Math.max(0, this.inFlight - 1);
-      this.log({ kind: 'node-finished', nodeId, sessionId: evt.sessionId, state: 'cancelled', reason: 'interrupted' });
-      void this.deps.host.setKanbanColumn(evt.sessionId, 'todo');
-      this.scheduleReady();
-    } else {
-      // 'error' | 'timeout'
-      this.failNode(nodeId, evt.reason, evt.sessionId);
+    if (evt.reason === 'interrupted' || evt.reason === 'timeout') {
+      // The user stopped the step, usually to steer it. It is not finished and must not fail:
+      // it waits for them, and the turn that completes it later carries its output.
+      st.waitingForUser = true;
+      this.log({ kind: 'node-waiting', nodeId, sessionId: evt.sessionId, reason: 'stopped' });
+      void this.deps.host.setSessionStatus(evt.sessionId, WAITING_FOR_USER_STATUS);
+      return;
     }
+    if (evt.reason === 'error') {
+      this.failNode(nodeId, 'error', evt.sessionId);
+      return;
+    }
+
+    if (evt.finalText?.trim()) st.replies.push(evt.finalText);
+    // Background agents survive a Stop and wake the session when they finish. That turn's reply
+    // is kept, but the step still waits for the user it was stopped for.
+    if (st.waitingForUser && evt.fromUser === false) return;
+    st.waitingForUser = false;
+    if ((evt.backgroundWorkRunning ?? 0) > 0) {
+      // Its background agents report back by waking the session for another turn.
+      this.log({ kind: 'node-waiting', nodeId, sessionId: evt.sessionId, reason: 'background-work' });
+      return;
+    }
+
+    const text = st.replies.join('\n\n');
+    if (text.trim() === '') {
+      // A finished turn without a reply delivered nothing for the dependents.
+      this.failNode(nodeId, 'finished without a reply', evt.sessionId);
+      return;
+    }
+    if (this.deps.classifyNodeOutcome && (this.deps.classifyNodeOutcome.isActive?.() ?? true)) {
+      void this.finishNodeAfterOutcomeCheck(nodeId, evt.sessionId, text);
+      return;
+    }
+    this.markNodeDone(nodeId, evt.sessionId, text);
   }
 
   private markNodeDone(nodeId: string, sessionId: string, text: string): void {
@@ -674,9 +726,13 @@ class ActiveRun {
     this.verdictOff?.();
     this.verdictOff = this.deps.host.onSessionComplete((evt) => {
       if (evt.sessionId !== orchestrator) return;
+      // A stopped verification turn is not an answer: the user continues it, and that turn answers.
+      if (evt.reason === 'interrupted' || evt.reason === 'timeout') return;
+      const text = evt.finalText ?? '';
+      // Still verifying with background agents: they wake the orchestrator for the verdict turn.
+      if ((evt.backgroundWorkRunning ?? 0) > 0 && parseVerdict(text).result === 'unparsed') return;
       this.verdictOff?.();
       this.verdictOff = undefined;
-      const text = evt.finalText ?? this.deps.host.getSessionFinalText(orchestrator) ?? '';
       this.handleVerdict(text);
     });
   }

@@ -9,10 +9,11 @@
  *   tasks:get      — spec + (optional) active run-state
  *   tasks:list     — task slugs with a task.yaml
  *
- * The legacy `tasks:getOutput` (background-task remnant) is handled in sessions.ts
- * and intentionally left untouched; retiring it is a separate cleanup.
+ * Background-task output and stop (the composer's task chips) are session channels in sessions.ts
+ * (`sessions:getBackgroundTaskOutput`, `sessions:stopBackgroundTask`).
  */
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
+import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import type {
   TaskCreateRequest,
   TaskCreateResult,
@@ -44,6 +45,7 @@ import {
 import { createLogger } from '@craft-agent/shared/utils'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
+import type { ISessionManager } from '../session-manager-interface'
 import { TaskRunner, createTaskFromSpec, finishTaskOrchestrator } from '../../tasks'
 import { buildTaskVerdictDecider } from '../../decisions/task-verdict'
 import { buildNodeOutcomeClassifier } from '../../decisions/turn-outcome'
@@ -81,7 +83,63 @@ function toValidationDto(result: ReturnType<typeof parseTaskYaml>): TaskValidati
   }
 }
 
-const GENERATE_TIMEOUT_MS = 180_000
+// An authoring turn fails when it shows no activity (text, thinking, tools) for this long, or
+// when one attempt runs past the cap. A fixed 180 s limit cut off turns that were slow but
+// still writing. The editor's fallback timer (TaskEditor GENERATE_CLIENT_TIMEOUT_MS) must stay
+// above MAX_GENERATE_ATTEMPTS × GENERATE_ATTEMPT_MAX_MS.
+export const GENERATE_IDLE_TIMEOUT_MS = 90_000
+export const GENERATE_ATTEMPT_MAX_MS = 300_000
+
+/**
+ * Send a turn and wait for its reply. Subscribes BEFORE sending, so a fast turn can't complete
+ * before we listen. Fails a turn that shows no activity for `idleMs` and any turn running past
+ * `maxMs`, and a stopped or failed turn at once. Resolves to that turn's reply only, never an
+ * earlier one.
+ */
+export function waitForTurnReply(
+  sessions: Pick<ISessionManager, 'onSessionComplete' | 'onSessionActivity'>,
+  sessionId: string,
+  send: () => Promise<void> | void,
+  opts: { idleMs?: number; maxMs?: number } = {},
+): Promise<string> {
+  const idleMs = opts.idleMs ?? GENERATE_IDLE_TIMEOUT_MS
+  const maxMs = opts.maxMs ?? GENERATE_ATTEMPT_MAX_MS
+  return new Promise<string>((resolve, reject) => {
+    let settled = false
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const cleanups: Array<() => void> = []
+    const finish = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      for (const cleanup of cleanups) cleanup()
+      clearTimeout(idleTimer)
+      fn()
+    }
+    const armIdleTimer = () => {
+      clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => finish(() => reject(new Error(`Task generation stalled (no progress for ${Math.round(idleMs / 1000)} s)`))), idleMs)
+    }
+    cleanups.push(sessions.onSessionActivity(sessionId, armIdleTimer))
+    cleanups.push(sessions.onSessionComplete((evt) => {
+      if (evt.sessionId !== sessionId) return
+      if (evt.reason !== 'complete') {
+        finish(() => reject(new Error(evt.reason === 'error' ? 'The authoring turn failed' : 'The authoring turn was stopped')))
+        return
+      }
+      finish(() => resolve(evt.finalText ?? ''))
+    }))
+    armIdleTimer()
+    const capTimer = setTimeout(() => finish(() => reject(new Error('Task generation timed out'))), maxMs)
+    cleanups.push(() => clearTimeout(capTimer))
+    void Promise.resolve()
+      .then(send)
+      .catch((err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))))
+  })
+}
+
+// Authoring a short YAML needs little thinking. Without this the turn ran at the workspace's
+// default level (often max), thought for minutes before its first token and hit the timeout.
+const GENERATE_THINKING_LEVEL: ThinkingLevel = 'medium'
 
 // One initial generation plus up to one feedback-driven repair turn. Bounded so a model
 // that keeps emitting invalid specs can't loop forever; the last attempt is returned as-is.
@@ -239,32 +297,12 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       projectId: req.projectId,
       hasConnection: Boolean(req.llmConnection),
       permissionMode: req.permissionMode,
+      thinkingLevel: GENERATE_THINKING_LEVEL,
     })
 
-    // Send `prompt` to the orchestrator and await its next final turn. Subscribe BEFORE
-    // sending so a fast turn can't complete before we listen; a timeout keeps a hung turn
-    // from blocking forever.
     const askOrchestrator = (prompt: string) =>
-      new Promise<string>((resolve, reject) => {
-        let settled = false
-        let off: (() => void) | undefined
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const finish = (fn: () => void) => {
-          if (settled) return
-          settled = true
-          off?.()
-          if (timer) clearTimeout(timer)
-          fn()
-        }
-        off = deps.sessionManager.onSessionComplete((evt) => {
-          if (evt.sessionId !== sessionId) return
-          const text = evt.finalText ?? deps.sessionManager.getSessionFinalText(sessionId) ?? ''
-          finish(() => resolve(text))
-        })
-        timer = setTimeout(() => finish(() => reject(new Error('Task generation timed out'))), GENERATE_TIMEOUT_MS)
-        void Promise.resolve(deps.sessionManager.sendMessage(sessionId, prompt))
-          .catch((err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))))
-      })
+      waitForTurnReply(deps.sessionManager, sessionId, () =>
+        deps.sessionManager.sendMessage(sessionId, prompt, undefined, undefined, { thinkingLevel: GENERATE_THINKING_LEVEL }))
 
     // Run the generate→repair loop in the background and push the result when done. Awaiting
     // here would re-introduce the synchronous-RPC-over-WS timeout this async path exists to avoid.

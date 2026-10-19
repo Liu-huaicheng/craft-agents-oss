@@ -8,6 +8,8 @@
 
 import { join } from 'path'
 import type { PlatformServices, Logger } from './platform'
+import { resolveInheritedAppEnv, sourceCheckoutRoot } from './inherited-app-env'
+import { ensureDecodableImage } from '../services/heic'
 
 /**
  * Simple console-based logger matching the Logger interface.
@@ -35,7 +37,10 @@ function createConsoleLogger(): Logger {
  * Create PlatformServices for headless (Bun) mode.
  *
  * Environment variables:
- * - CRAFT_APP_ROOT — override appRootPath (default: cwd)
+ * - CRAFT_APP_ROOT — override appRootPath (default: cwd). Ignored, together with every CRAFT_*
+ *   path inside it, when this server runs from a source checkout and the value points into
+ *   another one: that is a running Craft app's root inherited through an agent shell
+ *   (see inherited-app-env.ts).
  * - CRAFT_RESOURCES_PATH — override resourcesPath (default: cwd/resources)
  * - CRAFT_IS_PACKAGED — 'true' for production (default: false)
  * - CRAFT_VERSION — app version string (default: '0.0.0-dev')
@@ -43,23 +48,43 @@ function createConsoleLogger(): Logger {
  */
 export function createHeadlessPlatform(options?: { appVersion?: string }): PlatformServices {
   const logger = createConsoleLogger()
-  const isDebugMode = process.env.CRAFT_DEBUG === 'true' || process.env.CRAFT_IS_PACKAGED !== 'true'
+  const sourceRoot = sourceCheckoutRoot()
+  const inherited = resolveInheritedAppEnv(process.env, sourceRoot, process.cwd())
+  if (inherited.ignoredAppRoot) {
+    for (const key of inherited.dropKeys) delete process.env[key]
+    logger.warn(
+      `Ignoring CRAFT_APP_ROOT=${inherited.ignoredAppRoot}: it points outside this server's checkout (${sourceRoot}), ` +
+      `most likely inherited from a running Craft app. Dropped: ${inherited.dropKeys.join(', ')}. Using ${inherited.appRootPath}.`,
+    )
+  }
+  // Republish so tools this server spawns (agent shells, scripts) resolve the same root.
+  process.env.CRAFT_APP_ROOT = inherited.appRootPath
+  // A server running from source is never packaged, whatever an inherited env says (the packaged
+  // app exports CRAFT_IS_PACKAGED, which resolveScriptRuntime also reads from the env).
+  if (sourceRoot && (process.env.CRAFT_IS_PACKAGED === 'true' || process.env.CRAFT_IS_PACKAGED === '1')) {
+    logger.warn(`Ignoring CRAFT_IS_PACKAGED=${process.env.CRAFT_IS_PACKAGED}: this server runs from the source checkout ${sourceRoot}.`)
+    process.env.CRAFT_IS_PACKAGED = 'false'
+  }
+  const isPackaged = !sourceRoot && process.env.CRAFT_IS_PACKAGED === 'true'
+  const isDebugMode = process.env.CRAFT_DEBUG === 'true' || !isPackaged
 
   return {
-    appRootPath: process.env.CRAFT_APP_ROOT || process.cwd(),
+    appRootPath: inherited.appRootPath,
     resourcesPath: process.env.CRAFT_RESOURCES_PATH || join(process.cwd(), 'resources'),
-    isPackaged: process.env.CRAFT_IS_PACKAGED === 'true',
+    isPackaged,
     appVersion: process.env.CRAFT_VERSION || options?.appVersion || '0.0.0-dev',
 
     imageProcessor: {
       async getMetadata(buffer) {
         const sharp = (await import('sharp')).default
-        const m = await sharp(buffer).metadata().catch(() => null)
+        const decodable = await ensureDecodableImage(buffer)
+        const m = await sharp(decodable).metadata().catch(() => null)
         return (m?.width && m?.height) ? { width: m.width, height: m.height } : null
       },
       async process(input, opts = {}) {
         const sharp = (await import('sharp')).default
-        let pipeline = sharp(input)
+        const decodable = await ensureDecodableImage(input)
+        let pipeline = sharp(decodable)
         if (opts.resize) {
           pipeline = pipeline.resize(opts.resize.width, opts.resize.height, {
             fit: opts.fit ?? 'inside',

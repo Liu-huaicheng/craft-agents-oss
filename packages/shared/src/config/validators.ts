@@ -20,6 +20,7 @@ import { safeJsonParse, readJsonFileSync } from '../utils/files.ts';
 import { EntityColorSchema } from '../colors/validate.ts';
 import { THINKING_LEVEL_IDS } from '../agent/thinking-levels.ts';
 import { isValidProviderAuthCombination } from './llm-connections.ts';
+import { isParseableColor } from './theme-roles.ts';
 import { SUPPORTED_LANGUAGE_CODES } from '../i18n/languages.ts';
 import type { LanguageCode } from '../i18n/languages.ts';
 
@@ -80,6 +81,7 @@ const LlmAuthTypeSchema = z.enum([
 const CustomEndpointSchema = z.object({
   api: z.enum(['openai-completions', 'anthropic-messages']),
   supportsImages: z.boolean().optional(),
+  maxTokens: z.number().int().positive().optional(),
 });
 
 const LlmConnectionSchema = z.object({
@@ -1324,7 +1326,7 @@ export function validateLabelsContent(jsonString: string): ValidationResult {
         for (let j = 0; j < label.autoRules.length; j++) {
           const rule = label.autoRules[j];
           if (rule && typeof rule.semantic === 'string' && rule.pattern === undefined) {
-            const ruleResult = validateSemanticAutoLabelRule(rule);
+            const ruleResult = validateSemanticAutoLabelRule(rule, { valueType: label.valueType });
             for (const err of ruleResult.errors) {
               errors.push({
                 file,
@@ -1343,7 +1345,7 @@ export function validateLabelsContent(jsonString: string): ValidationResult {
               });
             }
           } else if (rule && rule.pattern) {
-            const ruleResult = validateAutoLabelRule(rule.pattern, rule.flags);
+            const ruleResult = validateAutoLabelRule(rule.pattern, rule.flags, { valueType: label.valueType, valueTemplate: rule.valueTemplate });
             for (const err of ruleResult.errors) {
               errors.push({
                 file,
@@ -1670,6 +1672,33 @@ export const PresetThemeSchema = z.object({
 );
 
 /**
+ * Warn about theme colors the role solver can't parse (e.g. `var(--x)`, `lab()`, typos). They are not
+ * errors — the app falls back to the default theme's color for that key — but users should know.
+ */
+function collectThemeColorWarnings(content: unknown, displayFile: string): ValidationIssue[] {
+  if (!content || typeof content !== 'object') return [];
+  const keys = ['background', 'foreground', 'accent', 'info', 'success', 'destructive', 'paper', 'navigator', 'input', 'popover', 'popoverSolid'];
+  const warnings: ValidationIssue[] = [];
+  const check = (obj: Record<string, unknown>, prefix: string) => {
+    for (const key of keys) {
+      const value = obj[key];
+      if (typeof value !== 'string' || isParseableColor(value)) continue;
+      warnings.push({
+        file: displayFile,
+        path: prefix + key,
+        message: `"${value}" is not a supported CSS color; the default theme's color is used instead`,
+        severity: 'warning',
+        suggestion: 'Use hex, rgb(), hsl(), oklch(), oklab() or a CSS color name',
+      });
+    }
+  };
+  const record = content as Record<string, unknown>;
+  check(record, '');
+  if (record.dark && typeof record.dark === 'object') check(record.dark as Record<string, unknown>, 'dark.');
+  return warnings;
+}
+
+/**
  * Validate theme content from a JSON string (no disk reads).
  * Used to check if an existing theme file is valid before deciding to overwrite.
  */
@@ -1703,7 +1732,7 @@ export function validateThemeContent(jsonString: string, displayFile: string = '
   return {
     valid: true,
     errors: [],
-    warnings: [],
+    warnings: collectThemeColorWarnings(content, displayFile),
   };
 }
 
@@ -1741,7 +1770,7 @@ export function validateThemeOverrideContent(jsonString: string, displayFile: st
   return {
     valid: true,
     errors: [],
-    warnings: [],
+    warnings: collectThemeColorWarnings(content, displayFile),
   };
 }
 

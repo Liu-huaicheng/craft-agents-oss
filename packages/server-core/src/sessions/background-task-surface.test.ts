@@ -87,7 +87,9 @@ describe('background task completion surfacing (idle keep-alive)', () => {
     expect(calls[0]!.msg).toContain('background-task-completed')
     expect(calls[0]!.msg).toContain("Look up today's AI news")
     expect(calls[0]!.msg).toContain('/tmp/tasks/task_1.output')
-    expect(calls[0]!.msg).toContain('present the results')
+    expect(calls[0]!.msg).toContain('Present it to the user now')
+    // An agent's output file is its whole transcript: never tell the agent to read it.
+    expect(calls[0]!.msg).not.toContain('Read that output file')
     // Loop guard: the nudge must tell the agent not to re-spawn a background agent.
     expect(calls[0]!.msg).toContain('Do NOT spawn another background agent')
     // Must be hidden so it never renders as a user-authored transcript bubble.

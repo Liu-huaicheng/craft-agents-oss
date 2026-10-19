@@ -66,13 +66,13 @@ export function SettingsToggle({
       data-layout="settings-row"
       className={cn(
         'flex items-center justify-between',
-        inCard ? 'px-4 py-3.5' : 'py-3',
+        inCard ? settingsUI.row : settingsUI.rowBare,
         disabled && 'opacity-50',
         className
       )}
     >
       <label htmlFor={id} className="flex-1 min-w-0 cursor-pointer select-none">
-        <div className={cn(settingsUI.label, tooltip && 'flex items-center gap-1.5')}>
+        <div className={cn(settingsUI.label, tooltip && 'flex items-center gap-1')}>
           {label}
           {tooltip && (
             <Tooltip>
@@ -82,7 +82,7 @@ export function SettingsToggle({
                 <button
                   type="button"
                   aria-label={t('common.info')}
-                  className="inline-flex rounded-sm text-foreground/40 hover:text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="-my-1 inline-grid size-6 shrink-0 place-items-center rounded-sm text-tertiary transition-colors duration-micro ease-out-subtle hover:text-secondary hover:duration-instant"
                   onClick={(event) => event.preventDefault()}
                 >
                   <Info className="size-3.5" aria-hidden />
@@ -103,7 +103,6 @@ export function SettingsToggle({
         onCheckedChange={onCheckedChange}
         disabled={disabled}
         data-layout="settings-control"
-        className="ml-4 shrink-0"
       />
     </div>
   )

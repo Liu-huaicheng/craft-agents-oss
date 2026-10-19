@@ -131,7 +131,7 @@ function createMockPermissionManager(overrides?: Partial<PermissionManagerLike>)
 function createMockPrerequisiteManager(overrides?: Partial<PrerequisiteManagerLike>): PrerequisiteManagerLike {
   return {
     checkPrerequisites: () => ({ allowed: true }),
-    trackBashSkillRead: () => false,
+    checkBashPrerequisites: () => ({ allowed: true }),
     ...overrides,
   };
 }
@@ -373,6 +373,45 @@ describe('runPreToolUseChecks', () => {
       }));
 
       expect(result.type).toBe('allow');
+    });
+
+    it('sends Bash calls to checkBashPrerequisites with their command', () => {
+      const checkBashPrerequisites = mock((_command: string) => ({ allowed: true }));
+      const checkPrerequisites = mock((_toolName: string) => ({ allowed: true }));
+
+      const result = runPreToolUseChecks(createInput({
+        toolName: 'Bash',
+        input: { command: 'cat ~/.craft-agent/docs/browser-tools.md' },
+        prerequisiteManager: createMockPrerequisiteManager({ checkBashPrerequisites, checkPrerequisites }),
+      }));
+
+      expect(result.type).toBe('allow');
+      expect(checkBashPrerequisites).toHaveBeenCalledWith('cat ~/.craft-agent/docs/browser-tools.md');
+      expect(checkPrerequisites).not.toHaveBeenCalled();
+    });
+
+    it('blocks a Bash call that checkBashPrerequisites holds back', () => {
+      const result = runPreToolUseChecks(createInput({
+        toolName: 'Bash',
+        input: { command: 'ls' },
+        prerequisiteManager: createMockPrerequisiteManager({
+          checkBashPrerequisites: () => ({ allowed: false, blockReason: 'You must read the skill instruction files first.' }),
+        }),
+      }));
+
+      expect(result).toEqual({ type: 'block', reason: 'You must read the skill instruction files first.', source: 'prerequisite' });
+    });
+
+    it('passes an empty command when the Bash input has none', () => {
+      const checkBashPrerequisites = mock((_command: string) => ({ allowed: true }));
+
+      runPreToolUseChecks(createInput({
+        toolName: 'Bash',
+        input: {},
+        prerequisiteManager: createMockPrerequisiteManager({ checkBashPrerequisites }),
+      }));
+
+      expect(checkBashPrerequisites).toHaveBeenCalledWith('');
     });
   });
 

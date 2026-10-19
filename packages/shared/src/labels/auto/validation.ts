@@ -27,14 +27,33 @@ const CATASTROPHIC_BACKTRACKING_PATTERNS = [
 ]
 
 /**
+ * True when a pattern has a capturing group: `(…)` or `(?<name>…)` — not `(?:…)`, a lookaround, or a
+ * paren that is escaped or inside a character class.
+ */
+export function hasCaptureGroup(pattern: string): boolean {
+  const bare = pattern.replace(/\\./g, '').replace(/\[[^\]]*\]/g, '')
+  return /\((?!\?)|\(\?<(?![=!])/.test(bare)
+}
+
+/** Shown when a rule sets a value on a label that cannot hold one. */
+const PLAIN_LABEL_VALUE_IGNORED =
+  'this label has no valueType, so the rule only applies the plain label. Give the label a valueType to store values.'
+
+/**
  * Validate a single auto-label rule.
  * Checks regex syntax, flags, and known problematic patterns.
  *
  * @param pattern - The regex pattern string
  * @param flags - Optional flags (defaults to 'gi')
+ * @param context - The label's valueType and the rule's valueTemplate, when known: a plain label
+ *   (no valueType) is presence-only, so its rules store no value
  * @returns Validation result with errors/warnings
  */
-export function validateAutoLabelRule(pattern: string, flags?: string): AutoLabelValidationResult {
+export function validateAutoLabelRule(
+  pattern: string,
+  flags?: string,
+  context?: { valueType?: string; valueTemplate?: string },
+): AutoLabelValidationResult {
   const errors: string[] = []
   const warnings: string[] = []
 
@@ -60,8 +79,13 @@ export function validateAutoLabelRule(pattern: string, flags?: string): AutoLabe
     }
   }
 
-  // 3. Warn about missing capture groups when no valueTemplate could use $1
-  if (!pattern.includes('(') || pattern.replace(/\(\?[:<!=]/g, '').indexOf('(') === -1) {
+  // 3. How a match becomes a value: nothing on a plain label (a template is ignored there);
+  //    on a valued label, a pattern without capture groups stores the whole match — unless a
+  //    constant template (no $N) supplies the value.
+  const constantTemplate = context?.valueTemplate !== undefined && !/\$\d/.test(context.valueTemplate)
+  if (context && !context.valueType) {
+    if (context.valueTemplate !== undefined) warnings.push(`valueTemplate is ignored: ${PLAIN_LABEL_VALUE_IGNORED}`)
+  } else if (!hasCaptureGroup(pattern) && !constantTemplate) {
     warnings.push(
       'Pattern has no capture groups. The entire match will be used as the label value. ' +
       'Add capture groups (parentheses) to extract specific parts.'
@@ -80,9 +104,13 @@ export const SEMANTIC_RULE_MAX_QUESTION_CHARS = 500
 
 /**
  * Validate a semantic (decision-model) auto-label rule: a non-empty question,
- * a threshold in (0, 1] when given, and a string value when given.
+ * a threshold in (0, 1] when given, and a string value when given. With `context`
+ * (the label's valueType), a value on a plain label is flagged as ignored.
  */
-export function validateSemanticAutoLabelRule(rule: { semantic?: unknown; threshold?: unknown; value?: unknown }): AutoLabelValidationResult {
+export function validateSemanticAutoLabelRule(
+  rule: { semantic?: unknown; threshold?: unknown; value?: unknown },
+  context?: { valueType?: string },
+): AutoLabelValidationResult {
   const errors: string[] = []
   const warnings: string[] = []
 
@@ -104,6 +132,8 @@ export function validateSemanticAutoLabelRule(rule: { semantic?: unknown; thresh
 
   if (rule.value !== undefined && typeof rule.value !== 'string') {
     errors.push('Semantic rule value must be a string')
+  } else if (rule.value !== undefined && context && !context.valueType) {
+    warnings.push(`value is ignored: ${PLAIN_LABEL_VALUE_IGNORED}`)
   }
 
   return { valid: errors.length === 0, errors, warnings }

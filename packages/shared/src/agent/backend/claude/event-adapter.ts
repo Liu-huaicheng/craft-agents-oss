@@ -18,7 +18,7 @@ import { contextAfterCompaction, contextFromClaude } from '../../context-usage.t
 import type { AgentError } from '../../errors.ts';
 import { BaseEventAdapter } from '../base-event-adapter.ts';
 import { ToolIndex, extractToolStarts, extractToolResults, isParentTaskTool, type ContentBlock } from '../../tool-matching.ts';
-import { classifyClaudeTaskNotification } from './task-notification.ts';
+import { classifyClaudeTaskNotification, classifyClaudeTaskProgress } from './task-notification.ts';
 
 /**
  * Callbacks injected by ClaudeAgent for operations that depend on agent state.
@@ -457,6 +457,18 @@ export class ClaudeEventAdapter extends BaseEventAdapter {
         }
       }
 
+      if (isDetachedToolCallResult(toolUseResultValue)) {
+        // The SDK moved this call (WebFetch/WebSearch) to the background for a message the user
+        // sent mid-turn; its tool_result text is a model-directed placeholder, and the real
+        // result reaches the model later as a queued task notification Craft never sees.
+        for (const event of resultEvents) {
+          if (event.type === 'tool_result') {
+            event.result = DETACHED_TOOL_CALL_RESULT;
+            event.isError = false;
+          }
+        }
+      }
+
       events.push(...resultEvents);
     }
   }
@@ -551,6 +563,12 @@ export class ClaudeEventAdapter extends BaseEventAdapter {
       cacheCreationTokens: cacheCreation,
       costUsd: msg.total_cost_usd,
       contextWindow: primaryModelUsage?.contextWindow,
+      // `total_cost_usd` and `modelUsage` are running totals for the SDK session (subagents
+      // included), not this turn's spend; `usage` covers the main loop only.
+      runningTotals: {
+        costUsd: msg.total_cost_usd ?? 0,
+        outputTokens: modelUsageEntries.reduce((sum: number, entry: any) => sum + (entry?.outputTokens ?? 0), 0),
+      },
     };
 
     if (this.manualCompactionRequested) {
@@ -617,6 +635,12 @@ export class ClaudeEventAdapter extends BaseEventAdapter {
           launchedHere: this.wasLaunchedByMainAgent(taskId, toolUseId),
         });
       }
+    } else if (msg.subtype === 'task_progress') {
+      // What one of the session's own background tasks is doing (a subagent's nested tasks have no chip)
+      const activity = classifyClaudeTaskProgress(message);
+      if (activity && this.wasLaunchedByMainAgent(activity.taskId, activity.toolUseId)) {
+        events.push({ type: 'task_activity', ...activity, turnId: this.currentTurnId || undefined });
+      }
     } else if (msg.subtype === 'task_started') {
       // Remember the session's own tasks (structured, unlike tool-result text) and announce a
       // background one; a foreground task is announced if it later moves to the background.
@@ -682,6 +706,20 @@ export class ClaudeEventAdapter extends BaseEventAdapter {
       });
     }
   }
+}
+
+/** Shown for a tool call the SDK moved to the background (see `isDetachedToolCallResult`). */
+export const DETACHED_TOOL_CALL_RESULT =
+  'Still running in the background — the result goes straight to the agent when it finishes.';
+
+/**
+ * `tool_use_result` of a call that stepped aside for a mid-turn user message (SDK >=0.3.287,
+ * WebFetch/WebSearch only). Craft's matcher-less PostToolUse hook keeps the CLI from detaching
+ * calls at all (`claude-agent.ts`), so this only guards against that hook ever being narrowed.
+ */
+export function isDetachedToolCallResult(value: unknown): boolean {
+  return typeof value === 'object' && value !== null
+    && (value as { detachedToolCall?: unknown }).detachedToolCall === true;
 }
 
 /** Drop the oldest entries (insertion order) beyond `max`. */
